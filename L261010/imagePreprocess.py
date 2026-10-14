@@ -1,17 +1,9 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
-
-"""
-Description: 图像预处理|demo
-Version:     v1.0
-Author:      Hjc
-Date:        2022年07月07日 16:55:06
-"""
+#!/usr/bin/env python3
 
 import cv2
 import numpy as np
 
-type = "video"  
+type = "video"
 
 # 读取
 if type == "video":
@@ -53,7 +45,7 @@ while image:
            （阈值的大小可自由设定）。
         3. 使用变量 edge 去承接边缘提取后的图片结果。
     """
-    edge = cv2.Canny(gaussianfilter, 100, 200)  #参考填空实现
+    edge = cv2.Canny(gaussianfilter, 100, 200)  # 参考填空实现
     # ##### 代码填空结束处 ##### #
     edge = cv2.merge([edge, edge, edge])
 
@@ -62,7 +54,7 @@ while image:
     _, binaryzation = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
 
     # 彩色图像均衡化
-    (b, g, r) = cv2.split(frame)
+    b, g, r = cv2.split(frame)
     frameB = cv2.equalizeHist(b)
     frameG = cv2.equalizeHist(g)
     frameR = cv2.equalizeHist(r)
