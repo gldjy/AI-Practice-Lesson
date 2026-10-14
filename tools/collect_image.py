@@ -2,16 +2,42 @@
 # collect_image.py <device> <save_dir>
 
 import os
+import re
 import sys
+from typing import Set
 
 import cv2
 
 WIDTH = 640
 HEIGHT = 480
 
+IMAGE_NAME_PATTERN = re.compile(r"^image_(\d+)\.jpg$")
+
+
+def scan_used_indices(save_dir: str) -> Set[int]:
+    if not os.path.isdir(save_dir):
+        return set()
+
+    used = set()
+    for name in os.listdir(save_dir):
+        match = IMAGE_NAME_PATTERN.match(name)
+        if match:
+            used.add(int(match.group(1)))
+    return used
+
+
+def next_free_index(used: Set[int], start: int = 0) -> int:
+    index = start
+    while index in used:
+        index += 1
+    return index
+
 
 def video(capture: cv2.VideoCapture, save_dir: str):
-    index = 0
+    used = scan_used_indices(save_dir)
+    index = next_free_index(used)
+    print(f"Found {len(used)} existing images, next index is {index:04d}")
+
     codec = cv2.VideoWriter_fourcc("M", "J", "P", "G")
     capture.set(cv2.CAP_PROP_FOURCC, codec)
     capture.set(cv2.CAP_PROP_FPS, 60)
@@ -44,7 +70,9 @@ def video(capture: cv2.VideoCapture, save_dir: str):
             file_path = os.path.join(save_dir, f"image_{index:04d}.jpg")
             cv2.imwrite(file_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
             print(f"Saved image to {file_path}")
-            index += 1
+
+            used.add(index)
+            index = next_free_index(used, index + 1)
         elif key == 27:  # Esc
             break
 
