@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
+# collect_image.py <device> <save_dir>
+
+import os
+import sys
 
 import cv2
-import os
 
-DEV = "/dev/video1"
 WIDTH = 640
 HEIGHT = 480
 
 
-def video(capture: cv2.VideoCapture):
+def video(capture: cv2.VideoCapture, save_dir: str):
     index = 0
     codec = cv2.VideoWriter_fourcc("M", "J", "P", "G")
     capture.set(cv2.CAP_PROP_FOURCC, codec)
@@ -20,8 +22,6 @@ def video(capture: cv2.VideoCapture):
     WINDOW_NAME = "Frame"
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WINDOW_NAME, WIDTH, HEIGHT)
-
-    work_dir = os.path.dirname(os.path.abspath(__file__))
 
     window_visible = False
 
@@ -39,7 +39,6 @@ def video(capture: cv2.VideoCapture):
         key = cv2.waitKey(1) & 0xFF
 
         if key == 32:  # Space
-            save_dir = os.path.join(work_dir, "images")
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
             file_path = os.path.join(save_dir, f"image_{index:04d}.jpg")
@@ -78,6 +77,11 @@ def video(capture: cv2.VideoCapture):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print(f"Usage: {os.path.basename(__file__)} <device> <save_dir>")
+        sys.exit(1)
+
+    dev, save_dir = sys.argv[1], sys.argv[2]
     print("Starting")
-    capture = cv2.VideoCapture(DEV)
-    video(capture)
+    capture = cv2.VideoCapture(dev)
+    video(capture, save_dir)
