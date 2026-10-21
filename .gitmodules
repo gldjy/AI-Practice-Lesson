@@ -1,0 +1,3 @@
+[submodule "vendors/paddet"]
+	path = vendors/paddet
+	url = https://github.com/PaddlePaddle/PaddleDetection.git
