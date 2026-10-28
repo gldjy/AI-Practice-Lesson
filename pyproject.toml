@@ -1,0 +1,60 @@
+[project]
+name = "ai-practice-lesson"
+version = "0.1.0"
+description = "Course project: object detection practice built on PaddleDetection"
+readme = "README.md"
+requires-python = ">=3.9,<3.13"
+
+# Shared by both groups. PaddleDetection v2.9 is developed against PaddlePaddle 2.6.2
+# The cu118 wheel works with any driver >= 450.80, so no local toolkit is required.
+# Windows reports platform_machine as AMD64, Linux as x86_64.
+dependencies = [
+    "paddlepaddle-gpu==2.6.2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "paddlepaddle-gpu==2.6.2; sys_platform == 'win32' and platform_machine == 'AMD64'",
+    # No GPU wheel exists for arm64, so Jetson and friends run the CPU build.
+    "paddlepaddle==2.6.2; sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[dependency-groups]
+# Runs the exported inference model through Paddle Inference
+deploy = [
+    "numpy<2",
+    "opencv-python<=4.6.0",
+    "pyyaml<7",
+    # paddle imports setuptools at runtime, see paddle/utils/cpp_extension.
+    "setuptools<81",
+]
+
+# Training, evaluation and export.
+train = [
+    { include-group = "deploy" },
+    "paddledet",
+    "tqdm<5",
+    "typeguard<5",
+    "scipy<2",
+    "shapely<3",
+    "pycocotools==2.0.8",
+    "imgaug>=0.4.0",
+    "packaging<27",
+    "pyclipper<2",
+    "terminaltables<4",
+    "cython<4",
+    "visualdl>=2.2.0",
+    "scikit-learn<2",
+    "motmetrics<2",
+    "lapx<1",
+]
+
+[[tool.uv.index]]
+name = "paddle"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu118/"
+explicit = true
+
+[tool.uv.sources]
+paddlepaddle-gpu = { index = "paddle" }
+paddledet = { path = "vendors/paddet", editable = true }
+
+[tool.uv]
+package = false
+# vendors/paddet/requirements.txt pins sklearn==0.0, a PyPI stub that raises on install.
+override-dependencies = ["sklearn; python_version < '0'"]
