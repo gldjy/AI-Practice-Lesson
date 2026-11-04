@@ -1,0 +1,26 @@
+_BASE_: [
+  '../../vendors/paddet/configs/picodet/picodet_s_320_coco_lcnet.yml',
+  'fivecubes_detection.yml',
+]
+
+save_dir: output/fivecubes/picodet_s_320
+weights: output/fivecubes/picodet_s_320/model_final
+epoch: 100
+snapshot_epoch: 20
+use_ema: false
+
+TrainReader:
+  batch_size: 16
+  worker_num: 2
+
+EvalReader:
+  batch_size: 8
+
+LearningRate:
+  base_lr: 0.08
+  schedulers:
+  - !CosineDecay
+    max_epochs: 160
+  - !LinearWarmup
+    start_factor: 0.1
+    steps: 300

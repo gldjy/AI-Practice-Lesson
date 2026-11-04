@@ -1,0 +1,22 @@
+metric: COCO
+num_classes: 6
+
+TrainDataset:
+  name: COCODataSet
+  image_dir: images
+  anno_path: annotations/instance_train.json
+  dataset_dir: datasets/fivecubes
+  data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+  allow_empty: true
+
+EvalDataset:
+  name: COCODataSet
+  image_dir: images
+  anno_path: annotations/instance_val.json
+  dataset_dir: datasets/fivecubes
+  allow_empty: true
+
+TestDataset:
+  name: ImageFolder
+  anno_path: annotations/instance_val.json
+  dataset_dir: datasets/fivecubes
