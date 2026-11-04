@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# prepare_dataset.py --zip <labeled.zip> [--out data/<dataset>] [--augment]
+# prepare_dataset.py --zip <labeled.zip> [--out datasets/<dataset>] [--augment]
 # Converts a labeled export (images + one XML per image) into a COCO dataset
 # that paddet can read:
 #   <out>/images/*.jpg
@@ -9,13 +9,13 @@
 #   <stem>_aux_1.jpg  horizontal flip
 #   <stem>_aux_2.jpg  vertical flip
 #   <stem>_aux_3.jpg  white balance shift
+# Images without an XML file are added to the training split as empty samples.
 
 import argparse
 import hashlib
 import json
 import random
 import re
-import shutil
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
@@ -163,6 +163,14 @@ def read_image(path: Path) -> np.ndarray:
     return image
 
 
+def decode_image(data: bytes, name: str) -> np.ndarray:
+    """Decodes one image from the labeled archive."""
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise OSError(f"cannot decode image: {name}")
+    return image
+
+
 def write_image(path: Path, image: np.ndarray) -> None:
     """Writes one image, failing loudly when the encoder rejects it."""
     if not cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 85]):
@@ -203,7 +211,7 @@ def augment_samples(samples: list[dict], images_dir: Path) -> list[dict]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zip", required=True, help="labeled export archive")
-    parser.add_argument("--out", default="data/dataset", help="output dataset dir")
+    parser.add_argument("--out", default="datasets/dataset", help="output dataset dir")
     parser.add_argument(
         "--augment",
         action="store_true",
@@ -225,31 +233,56 @@ def main() -> None:
     with zipfile.ZipFile(args.zip) as archive:
         names = archive.namelist()
         annotations = sorted(n for n in names if "/Annotations/" in n and n.endswith(".xml"))
+        image_members = {
+            Path(name).stem: name
+            for name in names
+            if "/Images/" in name and name.lower().endswith((".jpg", ".jpeg", ".png"))
+        }
 
+        annotated_stems = set()
         for anno_name in annotations:
             parsed = parse_annotation(archive.read(anno_name))
             stem = Path(anno_name).stem
-            image_name = next(
-                (Path(n).name for n in names
-                 if "/Images/" in n and Path(n).stem == stem and n.lower().endswith((".jpg", ".jpeg", ".png"))),
-                None,
-            )
-            if image_name is None:
+            member = image_members.get(stem)
+            if member is None:
                 raise FileNotFoundError(f"no image found for {anno_name}")
+            image_name = Path(member).name
             if AUX_PATTERN.search(Path(image_name).stem):
                 raise ValueError(f"input image already has an augmentation suffix: {image_name}")
 
-            member = next(n for n in names if Path(n).name == image_name and "/Images/" in n)
             target = images_dir / image_name
             if not target.exists():
-                with archive.open(member) as source, target.open("wb") as dest:
-                    shutil.copyfileobj(source, dest)
+                write_image(target, decode_image(archive.read(member), member))
             samples.append({"name": image_name, **parsed})
+            annotated_stems.add(stem)
+
+        # Images without an annotation file are empty scenes and join the training split.
+        for stem, member in sorted(image_members.items()):
+            if stem in annotated_stems:
+                continue
+            image_name = Path(member).name
+            if AUX_PATTERN.search(Path(image_name).stem):
+                raise ValueError(f"input image already has an augmentation suffix: {image_name}")
+
+            image = decode_image(archive.read(member), member)
+            target = images_dir / image_name
+            if not target.exists():
+                write_image(target, image)
+            height, width = image.shape[:2]
+            samples.append({
+                "name": image_name,
+                "width": width,
+                "height": height,
+                "boxes": [],
+            })
 
     samples.sort(key=lambda s: s["name"])
     categories = sorted({box[0] for sample in samples for box in sample["boxes"]})
 
-    train, val = split_samples(samples)
+    annotated_samples = [sample for sample in samples if sample["boxes"]]
+    empty_samples = [sample for sample in samples if not sample["boxes"]]
+    train, val = split_samples(annotated_samples)
+    train.extend(empty_samples)
     train_families = {family_of(sample["name"]) for sample in train}
     val_families = {family_of(sample["name"]) for sample in val}
     if train_families & val_families:
@@ -266,6 +299,7 @@ def main() -> None:
         path.write_text(json.dumps(build_coco(split_data, categories), indent=1))
 
     print(f"originals : {len(samples)}")
+    print(f"empty     : {len(empty_samples)} (train only)")
     print(f"augmented : {len(augmented)}")
     print(f"classes   : {categories}")
     print(f"train     : {len(train_output)} -> {annotations_dir / 'instance_train.json'}")

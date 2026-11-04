@@ -16,7 +16,7 @@ $VENV/bin/python vendors/paddet/tools/train.py -c configs/<dataset>/<model>.yml 
 
 ## 2 仓库结构
 
-`configs/` 存放数据集与模型配置，`tools/` 存放数据转换、环境检查与推理预览脚本，`vendors/paddet/` 是 PaddleDetection 子模块，`data/` 存放数据集且不纳入版本控制。仓库可以位于 Windows 文件系统，通过 `/mnt/<drive>/...` 在 WSL 内访问；虚拟环境建议放在 Linux 文件系统，例如 `~/.venvs/<project>`。PaddlePaddle 2.6.x 的 GPU wheel 不包含 CUDA 与 cuDNN，因此训练在 WSL 中完成，CUDA 默认安装到 `/usr/local/cuda-11.8`。
+`configs/` 存放数据集与模型配置，`tools/` 存放数据转换、环境检查与推理预览脚本，`vendors/paddet/` 是 PaddleDetection 子模块，`datasets/` 存放源数据集与生成数据集；源数据可纳入版本控制，增强数据由脚本生成且不纳入版本控制。仓库可以位于 Windows 文件系统，通过 `/mnt/<drive>/...` 在 WSL 内访问；虚拟环境建议放在 Linux 文件系统，例如 `~/.venvs/<project>`。PaddlePaddle 2.6.x 的 GPU wheel 不包含 CUDA 与 cuDNN，因此训练在 WSL 中完成，CUDA 默认安装到 `/usr/local/cuda-11.8`。
 
 ## 3 环境准备
 
@@ -90,22 +90,22 @@ Python 版本由 `.python-version` 固定为 3.10。`pyproject.toml` 固定 `set
 PaddleDetection 使用 COCO 目录结构：
 
 ```text
-data/<dataset>/{images, annotations/instance_{train,val}.json}
+datasets/<dataset>/{images, annotations/instance_{train,val}.json}
 ```
 
 转换脚本需满足以下约定：
 
-- 图片放入 `data/<dataset>/images/`。
+- 图片放入 `datasets/<dataset>/images/`。
 - 每张图片对应一条 `images` 记录，字段为 `id`、`file_name`、`width`、`height`。
 - 每个标注框对应一条 `annotations` 记录，字段为 `id`、`image_id`、`category_id`、`bbox`、`area`、`iscrowd`。
 - `bbox` 使用 `[x, y, w, h]`，原点位于左上角。
 - `categories` 从 1 开始连续编号。
 - 训练集与验证集使用固定随机种子划分。
 
-`tools/prepare_dataset.py` 读取 VOC 风格标注压缩包并输出上述结构。使用 `--augment` 时，每张训练原图还会生成水平翻转、垂直翻转与白平衡三张增强图，命名为 `<stem>_aux_<n>.jpg`，验证集不生成增强图：
+`tools/prepare_dataset.py` 读取 VOC 风格标注压缩包并输出上述结构。使用 `--augment` 时，每张训练原图还会生成水平翻转、垂直翻转与白平衡三张增强图，命名为 `<stem>_aux_<n>.jpg`，验证集不生成增强图。没有 XML 标注的空场景图片会作为空标注样本加入训练集，不进入验证集。数据集图片统一按 JPEG 质量 85 保存：
 
 ```bash
-$VENV/bin/python tools/prepare_dataset.py --zip <archive> --out data/<dataset> [--augment]
+$VENV/bin/python tools/prepare_dataset.py --zip <archive> --out datasets/<dataset> [--augment]
 ```
 
 数据集配置位于 `configs/<dataset>/<dataset>_detection.yml`，核心项为 `num_classes`，以及 `TrainDataset`、`EvalDataset` 中的 `dataset_dir`、`anno_path`、`image_dir`。少数类别显示 `-1.000` 表示该类别没有可评估样本，并非配置错误。
@@ -189,7 +189,7 @@ $VENV/bin/python tools/preview_detection.py --model-dir <save_dir>/inference \
 | 后台训练日志始终为 0 字节 | 输出接入 `tail` 后需等待进程结束 | 重定向到文件，另开窗口执行 `tail -f` |
 | `OSError: [Errno 12] Cannot allocate memory` 与 `Blocking queue is killed` | 同卡存在多个训练进程或 WSL 内存不足 | 用 `pgrep -af '[t]rain.py'` 确认唯一进程，清理时用 `pkill -9 -f '[t]rain.py'` |
 | `CUDA out of memory` | batch 过大 | 降低 `batch_size`，参考 `max_mem_reserved` |
-| 数据加载缓慢 | 图片位于 `/mnt`，跨文件系统读取 | 数据量大时将 `data/` 复制到 Linux 文件系统 |
+| 数据加载缓慢 | 图片位于 `/mnt`，跨文件系统读取 | 数据量大时将 `datasets/` 复制到 Linux 文件系统 |
 
 通用原则是按缺失项补齐依赖。补齐库后执行 `ldconfig` 并启动新进程，已运行的进程不会加载新库。
 
