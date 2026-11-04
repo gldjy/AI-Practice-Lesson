@@ -102,10 +102,10 @@ data/<dataset>/{images, annotations/instance_{train,val}.json}
 - `categories` 从 1 开始连续编号。
 - 训练集与验证集使用固定随机种子划分。
 
-`tools/prepare_dataset.py` 读取 VOC 风格标注压缩包并输出上述结构：
+`tools/prepare_dataset.py` 读取 VOC 风格标注压缩包并输出上述结构。使用 `--augment` 时，每张训练原图还会生成水平翻转、垂直翻转与白平衡三张增强图，命名为 `<stem>_aux_<n>.jpg`，验证集不生成增强图：
 
 ```bash
-$VENV/bin/python tools/prepare_dataset.py --zip <archive> --out data/<dataset>
+$VENV/bin/python tools/prepare_dataset.py --zip <archive> --out data/<dataset> [--augment]
 ```
 
 数据集配置位于 `configs/<dataset>/<dataset>_detection.yml`，核心项为 `num_classes`，以及 `TrainDataset`、`EvalDataset` 中的 `dataset_dir`、`anno_path`、`image_dir`。少数类别显示 `-1.000` 表示该类别没有可评估样本，并非配置错误。
