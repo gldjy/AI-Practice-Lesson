@@ -165,7 +165,7 @@ def read_image(path: Path) -> np.ndarray:
 
 def write_image(path: Path, image: np.ndarray) -> None:
     """Writes one image, failing loudly when the encoder rejects it."""
-    if not cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+    if not cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 85]):
         raise OSError(f"cannot write image: {path}")
 
 

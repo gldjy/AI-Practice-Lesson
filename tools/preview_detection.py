@@ -217,7 +217,7 @@ def main() -> int:
 
             if args.save:
                 if capture is None:
-                    cv2.imwrite(args.save, canvas)
+                    cv2.imwrite(args.save, canvas, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 else:
                     if writer is None:
                         height, width = canvas.shape[:2]

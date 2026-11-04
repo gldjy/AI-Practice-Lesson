@@ -68,7 +68,7 @@ def video(capture: cv2.VideoCapture, save_dir: str):
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
             file_path = os.path.join(save_dir, f"image_{index:04d}.jpg")
-            cv2.imwrite(file_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(file_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             print(f"Saved image to {file_path}")
 
             used.add(index)
