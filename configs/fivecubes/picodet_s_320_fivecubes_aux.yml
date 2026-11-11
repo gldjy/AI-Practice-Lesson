@@ -5,8 +5,8 @@ _BASE_: [
 
 save_dir: output/fivecubes_aux/picodet_s_320_160e
 weights: output/fivecubes_aux/picodet_s_320_160e/model_final
-epoch: 160
-snapshot_epoch: 20
+epoch: 200
+snapshot_epoch: 10
 use_ema: false
 
 TrainReader:
