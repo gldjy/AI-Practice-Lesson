@@ -16,6 +16,11 @@ TrainReader:
 EvalReader:
   batch_size: 8
 
+PicoHeadV2:
+  nms:
+    nms_top_k: 400
+    keep_top_k: 40
+
 LearningRate:
   base_lr: 0.08
   schedulers:
