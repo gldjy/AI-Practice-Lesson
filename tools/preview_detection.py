@@ -16,9 +16,18 @@ import paddle.inference as paddle_infer
 import yaml
 
 PALETTE = [
-    (56, 56, 255), (151, 157, 255), (31, 112, 255), (29, 178, 255),
-    (49, 210, 207), (10, 249, 72), (23, 204, 146), (134, 219, 61),
-    (52, 147, 26), (187, 212, 0), (168, 153, 44), (255, 194, 0),
+    (56, 56, 255),
+    (151, 157, 255),
+    (31, 112, 255),
+    (29, 178, 255),
+    (49, 210, 207),
+    (10, 249, 72),
+    (23, 204, 146),
+    (134, 219, 61),
+    (52, 147, 26),
+    (187, 212, 0),
+    (168, 153, 44),
+    (255, 194, 0),
 ]
 
 
@@ -30,7 +39,9 @@ def resolve_model_dir(path: str) -> Path:
     candidates = [p.parent for p in model_dir.glob("*/model.pdmodel")]
     if len(candidates) == 1:
         return candidates[0]
-    raise SystemExit(f"no model.pdmodel in {model_dir}, export one with tools/export_model.py")
+    raise SystemExit(
+        f"no model.pdmodel in {model_dir}, export one with tools/export_model.py"
+    )
 
 
 def load_infer_config(model_dir: Path) -> dict:
@@ -81,7 +92,9 @@ def preprocess(frame: np.ndarray, infer_cfg: dict) -> tuple[np.ndarray, np.ndarr
     return blob, scale_factor
 
 
-def detect(predictor, frame: np.ndarray, infer_cfg: dict, threshold: float) -> list[dict]:
+def detect(
+    predictor, frame: np.ndarray, infer_cfg: dict, threshold: float
+) -> list[dict]:
     """Runs one frame and returns the boxes above the score threshold.
 
     Static-shape exports bake the input size into the graph, so their NMS works
@@ -105,7 +118,11 @@ def detect(predictor, frame: np.ndarray, infer_cfg: dict, threshold: float) -> l
 
     outputs = predictor.get_output_names()
     boxes = predictor.get_output_handle(outputs[0]).copy_to_cpu()
-    count = int(predictor.get_output_handle(outputs[1]).copy_to_cpu()[0]) if len(outputs) > 1 else len(boxes)
+    count = (
+        int(predictor.get_output_handle(outputs[1]).copy_to_cpu()[0])
+        if len(outputs) > 1
+        else len(boxes)
+    )
 
     target_h, target_w = infer_cfg["Preprocess"][0]["target_size"]
     scale_x = 1.0 if dynamic_shape else frame.shape[1] / target_w
@@ -116,14 +133,18 @@ def detect(predictor, frame: np.ndarray, infer_cfg: dict, threshold: float) -> l
     for class_id, score, x1, y1, x2, y2 in boxes[:count]:
         if score < threshold:
             continue
-        detections.append({
-            "label": labels[int(class_id)],
-            "score": float(score),
-            "box": (
-                int(x1 * scale_x), int(y1 * scale_y),
-                int(x2 * scale_x), int(y2 * scale_y),
-            ),
-        })
+        detections.append(
+            {
+                "label": labels[int(class_id)],
+                "score": float(score),
+                "box": (
+                    int(x1 * scale_x),
+                    int(y1 * scale_y),
+                    int(x2 * scale_x),
+                    int(y2 * scale_y),
+                ),
+            }
+        )
     return detections
 
 
@@ -137,19 +158,37 @@ def draw(frame: np.ndarray, detections: list[dict], fps: float) -> np.ndarray:
 
         text = f"{detection['label']} {detection['score']:.2f}"
         (width, height), baseline = cv2.getTextSize(
-            text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+        )
         # prefer above the box, drop inside when the box touches the top edge
         top = y1 - height - baseline - 6
         if top < 0:
             top = y1 + 2
-        cv2.rectangle(canvas, (x1, top), (x1 + width + 6, top + height + baseline + 4),
-                      color, -1)
-        cv2.putText(canvas, text, (x1 + 3, top + height + 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.rectangle(
+            canvas, (x1, top), (x1 + width + 6, top + height + baseline + 4), color, -1
+        )
+        cv2.putText(
+            canvas,
+            text,
+            (x1 + 3, top + height + 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
 
     height = canvas.shape[0]
-    cv2.putText(canvas, f"{fps:5.1f} fps  {len(detections)} obj", (8, height - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        f"{fps:5.1f} fps  {len(detections)} obj",
+        (8, height - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA,
+    )
     return canvas
 
 
@@ -172,22 +211,38 @@ def open_source(source: str):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-dir", required=True,
-                        help="directory with model.pdmodel, model.pdiparams, infer_cfg.yml")
-    parser.add_argument("--source", default="0",
-                        help="camera index, video path or image path (default: 0)")
+    parser.add_argument(
+        "--model-dir",
+        required=True,
+        help="directory with model.pdmodel, model.pdiparams, infer_cfg.yml",
+    )
+    parser.add_argument(
+        "--source",
+        default="0",
+        help="camera index, video path or image path (default: 0)",
+    )
     parser.add_argument("--device", default="CPU", choices=["CPU", "GPU"])
     parser.add_argument("--threads", type=int, default=4, help="CPU inference threads")
-    parser.add_argument("--threshold", type=float, default=None,
-                        help="score threshold, defaults to draw_threshold from infer_cfg.yml")
-    parser.add_argument("--save", default=None, help="write the result to this image or video")
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="score threshold, defaults to draw_threshold from infer_cfg.yml",
+    )
+    parser.add_argument(
+        "--save", default=None, help="write the result to this image or video"
+    )
     parser.add_argument("--no-show", action="store_true", help="do not open a window")
     parser.add_argument("--max-frames", type=int, default=0, help="stop after N frames")
     args = parser.parse_args()
 
     model_dir = resolve_model_dir(args.model_dir)
     infer_cfg = load_infer_config(model_dir)
-    threshold = args.threshold if args.threshold is not None else float(infer_cfg.get("draw_threshold", 0.5))
+    threshold = (
+        args.threshold
+        if args.threshold is not None
+        else float(infer_cfg.get("draw_threshold", 0.5))
+    )
     predictor = create_predictor(model_dir, args.device, args.threads)
     print(f"model     : {model_dir}")
     print(f"classes   : {infer_cfg['label_list']}")
@@ -222,8 +277,11 @@ def main() -> int:
                     if writer is None:
                         height, width = canvas.shape[:2]
                         writer = cv2.VideoWriter(
-                            args.save, cv2.VideoWriter_fourcc(*"mp4v"),
-                            capture.get(cv2.CAP_PROP_FPS) or 25.0, (width, height))
+                            args.save,
+                            cv2.VideoWriter_fourcc(*"mp4v"),
+                            capture.get(cv2.CAP_PROP_FPS) or 25.0,
+                            (width, height),
+                        )
                     writer.write(canvas)
             if not args.no_show:
                 cv2.imshow("preview_detection", canvas)
