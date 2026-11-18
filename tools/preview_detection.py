@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -154,8 +155,20 @@ def detect(
     return detections
 
 
-def draw(frame: np.ndarray, detections: list[dict], fps: float) -> np.ndarray:
-    """Draws boxes, labels and the frame rate on a copy of the frame."""
+def mean(values) -> float:
+    """Returns the arithmetic mean, or 0.0 for an empty sequence."""
+    return sum(values) / len(values) if values else 0.0
+
+
+def mean_ms(values) -> float:
+    """Returns the arithmetic mean in milliseconds."""
+    return mean(values) * 1000.0
+
+
+def draw(
+    frame: np.ndarray, detections: list[dict], fps: float, loop_fps: float = 0.0
+) -> np.ndarray:
+    """Draws boxes, labels and both frame rates on a copy of the frame."""
     canvas = frame.copy()
     for index, detection in enumerate(detections):
         color = PALETTE[index % len(PALETTE)]
@@ -187,7 +200,7 @@ def draw(frame: np.ndarray, detections: list[dict], fps: float) -> np.ndarray:
     height = canvas.shape[0]
     cv2.putText(
         canvas,
-        f"{fps:5.1f} fps  {len(detections)} obj",
+        f"infer {fps:5.1f}  loop {loop_fps:5.1f} fps  {len(detections)} obj",
         (8, height - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.6,
@@ -205,14 +218,37 @@ def open_source(source: str):
         if not capture.isOpened():
             raise SystemExit(f"cannot open camera {source}")
         return capture
-    if not Path(source).is_file():
+    if not Path(source).exists():
         raise SystemExit(f"{source} does not exist")
-    if Path(source).suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
+    if Path(source).is_file() and Path(source).suffix.lower() in {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp",
+    }:
         return None
     capture = cv2.VideoCapture(source)
     if not capture.isOpened():
         raise SystemExit(f"cannot open video {source}")
     return capture
+
+
+def report_capture(capture) -> None:
+    """Prints the negotiated camera or video properties."""
+    if capture is None:
+        return
+    fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
+    codec = (
+        "".join(chr((fourcc >> (8 * i)) & 0xFF) for i in range(4))
+        if fourcc
+        else "unknown"
+    )
+    print(
+        f"capture   : {int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+        f"{int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))}, "
+        f"{capture.get(cv2.CAP_PROP_FPS):.1f} fps, "
+        f"buffer {int(capture.get(cv2.CAP_PROP_BUFFERSIZE))}, fourcc {codec}"
+    )
 
 
 def main() -> int:
@@ -240,6 +276,11 @@ def main() -> int:
     )
     parser.add_argument("--no-show", action="store_true", help="do not open a window")
     parser.add_argument("--max-frames", type=int, default=0, help="stop after N frames")
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="print read/detect/draw/save/show timings every 30 frames",
+    )
     args = parser.parse_args()
 
     model_dir = resolve_model_dir(args.model_dir)
@@ -255,12 +296,23 @@ def main() -> int:
     print(f"device    : {args.device}, threshold {threshold}")
 
     capture = open_source(args.source)
+    report_capture(capture)
     writer = None
     frame_times: list[float] = []
+    loop_times: list[float] = []
+    stage_times = {
+        name: deque(maxlen=30)
+        for name in ("read", "detect", "draw", "save", "show", "loop")
+    }
     processed = 0
+    fps = 0.0
+    loop_fps = 0.0
 
     try:
         while True:
+            loop_start = time.perf_counter()
+
+            read_start = time.perf_counter()
             if capture is None:
                 frame = cv2.imread(args.source)
                 if frame is None:
@@ -269,13 +321,22 @@ def main() -> int:
                 ok, frame = capture.read()
                 if not ok:
                     break
+            stage_times["read"].append(time.perf_counter() - read_start)
 
-            start = time.perf_counter()
+            detect_start = time.perf_counter()
             detections = detect(predictor, frame, infer_cfg, threshold)
-            frame_times = (frame_times + [time.perf_counter() - start])[-30:]
-            fps = 1.0 / (sum(frame_times) / len(frame_times))
-            canvas = draw(frame, detections, fps)
+            detect_time = time.perf_counter() - detect_start
+            frame_times = (frame_times + [detect_time])[-30:]
+            fps = 1.0 / mean(frame_times)
+            stage_times["detect"].append(detect_time)
 
+            if loop_times:
+                loop_fps = 1.0 / mean(loop_times)
+            draw_start = time.perf_counter()
+            canvas = draw(frame, detections, fps, loop_fps)
+            stage_times["draw"].append(time.perf_counter() - draw_start)
+
+            save_start = time.perf_counter()
             if args.save:
                 if capture is None:
                     cv2.imwrite(args.save, canvas, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -289,12 +350,30 @@ def main() -> int:
                             (width, height),
                         )
                     writer.write(canvas)
+            stage_times["save"].append(time.perf_counter() - save_start)
+
+            show_start = time.perf_counter()
             if not args.no_show:
                 cv2.imshow("preview_detection", canvas)
                 if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                     break
+            stage_times["show"].append(time.perf_counter() - show_start)
+
+            loop_time = time.perf_counter() - loop_start
+            loop_times = (loop_times + [loop_time])[-30:]
+            stage_times["loop"].append(loop_time)
 
             processed += 1
+            if args.profile and processed % 30 == 0:
+                print(
+                    f"profile   : frame {processed:5d} | "
+                    f"read {mean_ms(stage_times['read']):6.1f} ms | "
+                    f"detect {mean_ms(stage_times['detect']):6.1f} ms | "
+                    f"draw {mean_ms(stage_times['draw']):5.1f} ms | "
+                    f"save {mean_ms(stage_times['save']):5.1f} ms | "
+                    f"show {mean_ms(stage_times['show']):6.1f} ms | "
+                    f"loop {mean_ms(stage_times['loop']):6.1f} ms"
+                )
             if capture is None or (args.max_frames and processed >= args.max_frames):
                 break
     finally:
@@ -304,7 +383,24 @@ def main() -> int:
             writer.release()
         cv2.destroyAllWindows()
 
-    print(f"processed : {processed} frame(s), last fps {fps:.1f}")
+    if frame_times:
+        fps = 1.0 / mean(frame_times)
+    if loop_times:
+        loop_fps = 1.0 / mean(loop_times)
+    print(
+        f"processed : {processed} frame(s), inference {fps:.1f} fps, "
+        f"loop {loop_fps:.1f} fps"
+    )
+    if args.profile:
+        print(
+            "profile   : last 30 mean "
+            f"read {mean_ms(stage_times['read']):.1f} ms, "
+            f"detect {mean_ms(stage_times['detect']):.1f} ms, "
+            f"draw {mean_ms(stage_times['draw']):.1f} ms, "
+            f"save {mean_ms(stage_times['save']):.1f} ms, "
+            f"show {mean_ms(stage_times['show']):.1f} ms, "
+            f"loop {mean_ms(stage_times['loop']):.1f} ms"
+        )
     return 0
 
 
