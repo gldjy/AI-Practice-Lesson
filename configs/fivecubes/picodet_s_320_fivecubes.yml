@@ -5,7 +5,7 @@ _BASE_: [
 
 save_dir: output/fivecubes/picodet_s_320
 weights: output/fivecubes/picodet_s_320/model_final
-epoch: 200
+epoch: 150
 snapshot_epoch: 10
 use_ema: false
 
@@ -25,7 +25,7 @@ LearningRate:
   base_lr: 0.08
   schedulers:
   - !CosineDecay
-    max_epochs: 160
+    max_epochs: 150
   - !LinearWarmup
     start_factor: 0.1
     steps: 300

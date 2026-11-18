@@ -155,6 +155,17 @@ $VENV/bin/python vendors/paddet/tools/export_model.py \
 
 导出目录包含 `model.pdmodel`、`model.pdiparams` 与 `infer_cfg.yml`。`infer_cfg.yml` 保存预处理参数、类别名与 NMS 阈值。更换数据集或修改模型结构后必须重新导出，`label_list` 由配置生成。
 
+`output/` 不纳入版本控制，训练机上的权重不会随仓库出现在另一台机器。`.pdparams` 是动态图训练权重，Paddle Inference 不能直接加载。目标机器只需导出目录中的 `model.pdmodel`、`model.pdiparams` 与 `infer_cfg.yml`，应整体复制该目录，而不是只复制 `.pdparams`：
+
+```bash
+tar -czf model.tar.gz -C <save_dir>/inference .
+# 将 model.tar.gz 复制到目标机器后
+mkdir -p <model_dir>
+tar -xzf model.tar.gz -C <model_dir>
+```
+
+目标机器只安装 `deploy` 组即可运行预览。`--model-dir` 既可以指向导出目录，也可以指向包含导出目录的训练运行目录。目标机器若同时具备训练环境，也可以直接用 `best_model.pdparams` 重新导出。
+
 ### 6.2 实时预览
 
 `tools/preview_detection.py` 仅依赖 Paddle Inference、OpenCV 与 PyYAML，不导入 `paddet`，因此可在 `deploy` 组中运行。
