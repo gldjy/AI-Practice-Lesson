@@ -1,11 +1,15 @@
 #!/usr/bin/env python
 
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from uart import *
+
+# Resolve resources against this file so the panel works from any cwd.
+RES_DIR = Path(__file__).resolve().parent / "res"
 
 
 class Panel:
@@ -20,7 +24,7 @@ class Panel:
         self.button = self.Button()  # 初始化按钮状态
         self.error = [0] * 12  # 初始化错误代码状态
         self.font = ImageFont.truetype(
-            "./res/utils/QingNingYouYuan.ttf", 30
+            str(RES_DIR / "utils/QingNingYouYuan.ttf"), 30
         )  # 系统日志
 
     class Button:
@@ -38,7 +42,7 @@ class Panel:
         显示错误代码信息
         """
         if uart.sensors.errorCode != 0:
-            errorLogo = cv2.imread("./res/images/panel/errorcode.png")
+            errorLogo = cv2.imread(str(RES_DIR / "images/panel/errorcode.png"))
             errorLogo = cv2.resize(errorLogo, (158, 158))
             img[28 : 28 + 158, 229 : 229 + 158] = errorLogo  # 绘制错误代码标志
 
@@ -95,7 +99,7 @@ class Panel:
         """
         # 检测串口数据是否正常发送
         if uart.connect:
-            connect = cv2.imread("./res/images/panel/data.png")
+            connect = cv2.imread(str(RES_DIR / "images/panel/data.png"))
             connect = cv2.resize(connect, (158, 158))
             img[22 : 22 + 158, 35 : 35 + 158] = connect
 
@@ -495,7 +499,7 @@ if __name__ == "__main__":
         frame = cv2.flip(frame, 1)  # 画面水平翻转
 
         uart.comStatusCheck()  # 通信连接状态检测
-        img = cv2.imread("./res/images/panel/AiBox.png")  # 读取实验箱图片
+        img = cv2.imread(str(RES_DIR / "images/panel/AiBox.png"))  # 读取实验箱图片
         img = cv2.resize(img, (1920, 1080))  # 调整图片大小
         img = panel.showError(frame, img)  # 显示摄像头视频和错误代码提示
         img = panel.showData(img)  # 显示传感器数据
