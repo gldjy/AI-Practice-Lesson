@@ -36,11 +36,16 @@ def resolve_model_dir(path: str) -> Path:
     model_dir = Path(path)
     if (model_dir / "model.pdmodel").is_file():
         return model_dir
-    candidates = [p.parent for p in model_dir.glob("*/model.pdmodel")]
+
+    candidates = sorted(p.parent for p in model_dir.rglob("model.pdmodel"))
     if len(candidates) == 1:
         return candidates[0]
+    if len(candidates) > 1:
+        listed = ", ".join(str(p) for p in candidates)
+        raise SystemExit(f"multiple model.pdmodel under {model_dir}: {listed}")
+
     raise SystemExit(
-        f"no model.pdmodel in {model_dir}, export one with tools/export_model.py"
+        f"no model.pdmodel under {model_dir}, please confirm your export artifacts."
     )
 
 
