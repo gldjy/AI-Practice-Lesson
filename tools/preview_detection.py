@@ -77,7 +77,8 @@ def preprocess(frame: np.ndarray, infer_cfg: dict) -> tuple[np.ndarray, np.ndarr
         kind = op["type"]
         if kind == "Resize":
             height, width = op["target_size"]
-            image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
+            interp = int(op.get("interp", cv2.INTER_LINEAR))
+            image = cv2.resize(image, (width, height), interpolation=interp)
         elif kind == "NormalizeImage":
             image = image.astype("float32")
             scale = 1.0 / 255.0 if op.get("is_scale", True) else 1.0

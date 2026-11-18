@@ -1,0 +1,52 @@
+_BASE_: [
+  '../../vendors/paddet/configs/picodet/picodet_xs_320_coco_lcnet.yml',
+  'fivecubes_aux_detection.yml',
+]
+
+save_dir: output/fivecubes_aux/picodet_xs_256
+weights: output/fivecubes_aux/picodet_xs_256/model_final
+output_eval: output/fivecubes_aux/picodet_xs_256
+eval_size: [256, 256]
+epoch: 150
+snapshot_epoch: 1
+use_ema: false
+
+TrainReader:
+  batch_size: 16
+  worker_num: 2
+  batch_transforms:
+  - BatchRandomResize: {target_size: [224, 256, 288], random_size: True, random_interp: True, keep_ratio: False}
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229,0.224,0.225]}
+  - Permute: {}
+  - PadGT: {}
+
+EvalReader:
+  batch_size: 8
+  sample_transforms:
+  - Decode: {}
+  - Resize: {interp: 2, target_size: [256, 256], keep_ratio: False}
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229,0.224,0.225]}
+  - Permute: {}
+
+TestReader:
+  inputs_def:
+    image_shape: [1, 3, 256, 256]
+  sample_transforms:
+  - Decode: {}
+  - Resize: {interp: 2, target_size: [256, 256], keep_ratio: False}
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229,0.224,0.225]}
+  - Permute: {}
+
+PicoHeadV2:
+  nms:
+    nms_top_k: 400
+    keep_top_k: 40
+
+LearningRate:
+  base_lr: 0.08
+  schedulers:
+  - !CosineDecay
+    max_epochs: 150
+  - !LinearWarmup
+    start_factor: 0.1
+    steps: 300
