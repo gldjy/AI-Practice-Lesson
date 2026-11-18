@@ -20,15 +20,14 @@ import time
 
 from uart import *
 
-# Angles exercised by the preset action groups. They are not guaranteed
-# mechanical limits, so keep them as a conservative envelope for testing.
+# Measured safe envelope for the current kit; see ArmParam.md.
 JOINT_LIMITS = {
-    1: (500, 665),
-    2: (125, 500),
-    3: (50, 500),
-    4: (500, 1000),
-    5: (170, 750),
-    6: (130, 960),
+    1: (500, 665),  # Gripper: 640 grabs a cube.
+    2: (145, 500),  # Upper bound not measured yet.
+    3: (120, 500),
+    4: (500, 860),
+    5: (150, 740),
+    6: (140, 860),
 }
 
 ROLE_NAMES = {
