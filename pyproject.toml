@@ -25,6 +25,15 @@ deploy = [
     "setuptools<81",
 ]
 
+# Display panel for the AiBox experiment kit: UART sensor readings plus the
+# camera feed rendered onto the box background.
+panel = [
+    "numpy<2",
+    "opencv-python<=4.6.0",
+    "pillow>=10",
+    "pyserial>=3.5",
+]
+
 # Training, evaluation and export.
 train = [
     { include-group = "deploy" },
