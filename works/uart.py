@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import os
 import signal
 import struct
 import threading
@@ -11,6 +12,7 @@ import serial
 USB_FRAME_HEAD = bytes.fromhex("42")  # 通信序列帧头
 USB_FRAME_LENMAX = 30  # 通信序列字节最长长度
 USB_FRAME_LENMIN = 4  # 通信序列字节最短长度
+USB_FRAME_GAP = 0.03  # Reserves controller parsing time after every frame.
 
 # 通信地址
 USB_ADDR_ERRORCODE = bytes.fromhex("01")  # 错误代码
@@ -234,7 +236,13 @@ class Uart:
         self.recFinish = False  # 接收并校验成功标志
         self.len = 0  # 帧长
         self.recBuff = [0] * USB_FRAME_LENMAX  # 临时接收数据区
-        self.timeHart = time.time()  # 记录心跳信号发送时间：s(float)
+        self.timeHart = None  # Sends the first heartbeat immediately.
+        self._tx_lock = threading.Lock()
+        self._heart_lock = threading.Lock()
+        self._next_tx = 0.0
+        self.io_error = None
+        self.received_frames = 0
+        self.trace = False
         self.connect = False  # 通信连接标志
         self.timeDrop = time.time()  # 记录通信掉线时间
         self.sensors = Sensors()  # 初始化传感器数据类
@@ -248,8 +256,10 @@ class Uart:
             self.port,
             int(self.baudRate),
             timeout=1,
+            write_timeout=1,
             parity=serial.PARITY_NONE,
             stopbits=1,
+            **({"exclusive": True} if os.name == "posix" else {}),
         )
         # 创建子线程并启动
         self.thread = threading.Thread(target=self.serialThread)
@@ -275,26 +285,35 @@ class Uart:
         self.robotArmMoveit(self.robotArm.Movement.reset)  # 机械臂复位(放置在传送台)
         time.sleep(4)  # 等待机械臂复位
         self.setEnable(0)  # 关闭机械臂电机
-        # 停止子线程
-        self.running = False
-        self.thread.join()
-        # 关闭串口
-        if self.serial:
-            self.serial.close()
+        self.close()
         print("[Info] uart thread is closed!")
         print("[Info] 串口通信多线程停止, 停止运行传送台, 关闭继电器!!!")
+
+    def close(self):
+        """Closes the transport without sending another arm movement."""
+        with self._tx_lock:
+            self.running = False
+        if self.thread:
+            self.thread.join(timeout=1.5)
+        if self.threadHeart:
+            self.threadHeart.join(timeout=1.5)
+        with self._tx_lock:
+            if self.serial:
+                self.serial.close()
 
     def serialThread(self):
         """
         串口接收多线程
         """
-        time.sleep(0.5)
-        # 判断串口是否运行
-        while self.running:
-            # 判断串口是否可读
-            if self.serial.in_waiting > 0:
+        try:
+            while self.running:
+                # A bounded blocking read leaves CPU time for the heartbeat.
                 data = self.serial.read(1)
-                self.receiveHandle(data)
+                if data:
+                    self.receiveHandle(data)
+        except Exception as exc:
+            if self.running:
+                self.io_error = exc
 
     def heartThread(self):
         """
@@ -304,6 +323,7 @@ class Uart:
         # 判断串口是否运行
         while self.running:
             self.transmitSysHeart()
+            time.sleep(0.2)
 
     def receiveHandle(self, data):
         """
@@ -337,13 +357,16 @@ class Uart:
 
         if (
             self.recIndex >= USB_FRAME_LENMAX or self.recIndex >= self.len
-        ) and self.recIndex > USB_FRAME_LENMIN:
+        ) and self.recIndex >= USB_FRAME_LENMIN:
             check = int(0)  # 数据校验
 
             for i in range(self.len - 1):  # 校验和（Byte）
                 check += int.from_bytes(self.recBuff[i], byteorder="big", signed=False)
 
             check = int(check % 256)
+            # A bad checksum must not leave the parser stuck in this frame.
+            self.recIndex = 0
+            self.recStart = False
             if check == int.from_bytes(
                 self.recBuff[self.len - 1], byteorder="big", signed=False
             ):  # 数据校验
@@ -354,6 +377,7 @@ class Uart:
                 self.timeDrop = time.time()  # 刷新通信掉线时间
                 self.connect = True  # 通信连接成功标志
                 self.transDataFrame()  # 接收成功，数据回响
+                self.received_frames += 1
 
     def transDataFrame(self):
         """
@@ -590,7 +614,20 @@ class Uart:
             check += i
             check = int(check % 256)
         frame = frame + check.to_bytes(1, byteorder="little", signed=False)
-        self.serial.write(frame + bytes.fromhex("00"))
+        frame += bytes.fromhex("00")
+        with self._tx_lock:
+            if not self.running:
+                return
+            delay = self._next_tx - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            if self.trace:
+                print(f"[UART TX] {frame.hex(' ')}", flush=True)
+            written = self.serial.write(frame)
+            if written != len(frame):
+                raise serial.SerialTimeoutException("Incomplete UART frame write")
+            # Includes wire time because write() may only enqueue the bytes.
+            self._next_tx = time.monotonic() + len(frame) * 10 / self.baudRate + USB_FRAME_GAP
 
     def setTransSpeed(self, speed):
         """
@@ -842,10 +879,11 @@ class Uart:
         """
         发送系统心跳(下位机掉线检测时间5s, 掉线后不主动上传数据)
         """
-        thisTime = time.time()  # 获取系统时间：s(float)
-        if thisTime - self.timeHart > 1:  # 自动1s发送一次心跳信号
-            self.transmitFrame(USB_ADDR_HEART, None)
-            self.timeHart = thisTime
+        with self._heart_lock:
+            thisTime = time.monotonic()
+            if self.timeHart is None or thisTime - self.timeHart >= 1:
+                self.transmitFrame(USB_ADDR_HEART, None)
+                self.timeHart = time.monotonic()
 
     def comStatusCheck(self):
         """

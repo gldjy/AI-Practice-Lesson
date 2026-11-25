@@ -57,11 +57,27 @@ def wait_for_pose(base):
         return pose
 
 
-def heartbeat(uart):
+def heartbeat(uart, stopped):
     """Sends the system heartbeat until the uart stops."""
-    while uart.running:
-        uart.transmitSysHeart()
-        time.sleep(0.2)
+    try:
+        while uart.running and not stopped.is_set():
+            uart.transmitSysHeart()
+            stopped.wait(0.2)
+    except Exception as exc:
+        uart.io_error = exc
+
+
+def check_uart(uart, require_connection=True):
+    """Raises when the serial transport or controller communication fails."""
+    if uart.io_error is not None:
+        raise RuntimeError(f"串口收发失败: {uart.io_error}") from uart.io_error
+    if not uart.running:
+        raise RuntimeError("串口已停止")
+    uart.comStatusCheck()
+    if require_connection and not uart.connect:
+        raise ConnectionError("下位机通信超时，停止发送机械臂动作")
+    if uart.sensors.errorCode & (1 << 10):
+        raise RuntimeError(f"下位机报告板间通信故障: 0x{uart.sensors.errorCode:04X}")
 
 
 def apply_pose(uart, pose, previous=None):
@@ -74,6 +90,7 @@ def apply_pose(uart, pose, previous=None):
         if previous is None or pose[joint] != previous.get(joint)
     ]
     for joint in changed:
+        check_uart(uart)
         uart.setArmAngle(joint, pose[joint])
         time.sleep(0.02)
     if changed:
@@ -87,24 +104,58 @@ def apply_pose(uart, pose, previous=None):
 def apply_pose_group(uart, pose, wait_ms=1500):
     """Sends the whole pose as one coordinated action group."""
     row = tuple(pose[joint] for joint in range(1, 7)) + (wait_ms,)
+    check_uart(uart)
     uart.setArmActions((row,))
-    deadline = time.time() + wait_ms / 1000.0 + 3.0
-    while uart.getArmActionsBusy() and time.time() < deadline:
-        time.sleep(0.05)
+    wait_action(uart, timeout=wait_ms / 1000.0 + 3.0)
     time.sleep(1.5)
+    check_uart(uart)
 
 
 def wait_action(uart, timeout=10.0):
-    """Waits until the last action group should have finished."""
-    deadline = time.time() + timeout
-    while uart.getArmActionsBusy() and time.time() < deadline:
+    """Waits for the local action timer while checking communication."""
+    deadline = time.monotonic() + timeout
+    while uart.getArmActionsBusy():
+        check_uart(uart)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("动作组本地等待超时")
         time.sleep(0.05)
+    check_uart(uart)
 
 
 def vendor_stand_pose(uart):
     """Returns the final angles of the vendor stand action group."""
     frames = [frame for frame in uart.robotArm.actionStand if len(frame) > 6]
     return {joint: frames[-1][joint - 1] for joint in range(1, 7)}
+
+
+def initialize_arm(uart):
+    """Waits for controller traffic before enabling and sending vendor stand."""
+    print("[Init 1/3] 发送心跳，等待下位机有效回包...", flush=True)
+    uart.transmitSysHeart()
+    deadline = time.monotonic() + 5.0
+    while not uart.connect:
+        check_uart(uart, require_connection=False)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("5 秒内未收到下位机有效回包，未发送使能或 stand")
+        time.sleep(0.05)
+    print(
+        f"[Info] 下位机已回包，错误码 0x{uart.sensors.errorCode:04X}", flush=True
+    )
+    time.sleep(1.0)  # Starts the boot delay after communication is established.
+    check_uart(uart)
+    print("[Init 2/3] 使能机械臂...", flush=True)
+    uart.setEnable(True)
+    time.sleep(0.3)  # Matches arm_test.py.
+    check_uart(uart)
+    print("[Init 3/3] 执行厂家 stand 初始化...", flush=True)
+    uart.robotArmMoveit(uart.robotArm.Movement.stand)
+    wait_action(uart)
+    time.sleep(3.0)
+    check_uart(uart)
+    stand_pose = vendor_stand_pose(uart)
+    print(f"[Info] 厂家 stand 已下发: {format_pose(stand_pose)}", flush=True)
+    print("[Info] 本地等待结束；协议没有机械臂到位回执。", flush=True)
+    return stand_pose
 
 
 GROUP_DELTA = 100
@@ -158,33 +209,34 @@ def run_arm(args, base, target_pose):
         return 1
 
     uart = Uart(args.serial)
+    uart.trace = args.trace_serial
     try:
         uart.start()
     except Exception as exc:
         print(f"[Error] 无法打开串口 {args.serial}: {exc}")
         return 1
 
+    stopped = threading.Event()
+    heart_thread = threading.Thread(target=heartbeat, args=(uart, stopped), daemon=True)
+    reset_on_exit = False
     try:
-        threading.Thread(target=heartbeat, args=(uart,), daemon=True).start()
-        time.sleep(1.0)  # Let the lower controller finish booting.
-        uart.setEnable(True)
-        time.sleep(0.5)
+        # Sends the first heartbeat synchronously before launching its worker.
+        uart.transmitSysHeart()
+        heart_thread.start()
+        stand_pose = initialize_arm(uart)
 
-        print("[Info] 执行厂家 stand 初始化...")
-        uart.robotArmMoveit(uart.robotArm.Movement.stand)
-        wait_action(uart)
-        time.sleep(3.0)  # Same settle time as arm_test.py.
-        stand_pose = vendor_stand_pose(uart)
-        print(f"[Info] 厂家 stand: {format_pose(stand_pose)}")
-        last = stand_pose
-
-        print(f"[Info] 调整到 server 姿态: {format_pose(target_pose)}")
-        apply_pose(uart, target_pose, stand_pose)
+        print(f"[Info] 调整到 server 姿态: {format_pose(target_pose)}", flush=True)
+        if needs_group(stand_pose, target_pose):
+            apply_pose_group(uart, target_pose)
+        else:
+            apply_pose(uart, target_pose, stand_pose)
         last = target_pose
+        reset_on_exit = True
         lost = False
         delay = 1.0 / args.rate
 
         while True:
+            check_uart(uart)
             try:
                 pose = fetch_pose(base)
                 if lost:
@@ -206,14 +258,23 @@ def run_arm(args, base, target_pose):
                 last = pose
             time.sleep(delay)
     except Exception as exc:
+        reset_on_exit = False
         print(f"[Error] 控制循环异常: {exc}")
         return 1
     finally:
-        print("[Info] 复位机械臂并关闭串口...")
         try:
-            uart.stop(0, 0)
+            if reset_on_exit and uart.io_error is None and uart.connect:
+                print("[Info] 复位机械臂并关闭串口...")
+                uart.stop(0, 0)
+            else:
+                print("[Info] 初始化中断或通信异常，关闭串口。")
         except Exception as exc:
             print(f"[Warning] 关闭串口时出错: {exc}")
+        finally:
+            stopped.set()
+            uart.close()
+            if heart_thread.ident is not None:
+                heart_thread.join(timeout=1.5)
     return 0
 
 
@@ -225,6 +286,7 @@ def main():
     parser.add_argument("--rate", type=float, default=20.0, help="轮询频率 Hz")
     parser.add_argument("--dry-run", action="store_true", help="不打开串口，只打印姿态")
     parser.add_argument("--yes", action="store_true", help="跳过启动确认")
+    parser.add_argument("--trace-serial", action="store_true", help="打印实际发送的串口帧")
     parser.add_argument("--force-start", action="store_true", help="允许从远离安全 stand 的姿态启动（危险）")
     args = parser.parse_args()
 
@@ -261,8 +323,8 @@ def main():
             print("\n[Info] 已停止")
         return 0
 
-    if deltas and args.yes and not args.force_start:
-        print("[Error] --yes 不会跳过远姿态保护。")
+    if deltas and not args.force_start:
+        print("[Error] 远姿态启动需要 --force-start，--yes 不会跳过保护。")
         print("[Error] 请先在网页点“初始姿态”或重启 server；确需强制启动时加 --force-start。")
         return 1
 
