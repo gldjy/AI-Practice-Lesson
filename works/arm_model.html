@@ -131,6 +131,7 @@
     font-size: 10.5px;
     line-height: 1.6;
   }
+  .hint.limit { color: #ffb36b; }
   .tip {
     position: fixed;
     right: 16px;
@@ -176,8 +177,9 @@
     <button id="pose">弯曲姿态</button>
   </div>
   <p class="hint">拖动夹爪舵机上的青色光环，自动解算 3/4/5/6 号并平滑跟随，拖动中实时同步给 client。</p>
+  <p class="hint limit" id="limit" hidden></p>
   <p class="note">
-    连杆长度按 ArmParam.md 的旋转中心距离绘制。底座立柱高度和连杆截面是显示估值，舵机体积已简化。模型只做关节限位，不检查箱体或线缆碰撞。初始姿态使用安全 stand（2 号 145，6 号 490）。通过 arm_server.py 打开时，滑杆变化会同步给 arm_client.py。
+    连杆长度按 ArmParam.md 的旋转中心距离绘制。底座立柱高度和连杆截面是显示估值，舵机体积已简化。模型做关节限位和桌面碰撞检查，不检查箱体、传送带或线缆碰撞。夹爪抓点和连杆需要高于桌面 12 mm。多个网页通过 arm_server.py 同步同一姿态。初始姿态使用安全 stand（2 号 145，6 号 490）。
   </p>
 </div>
 
@@ -215,6 +217,9 @@
 
   // Visual mount height from the table to the shoulder axis.
   var BASE_HEIGHT = 26;
+
+  // Keep the gripper and link centerlines at least this far above the table.
+  var TABLE_CLEARANCE = 12;
 
   // Keep in sync with arm_params.py.
   var JOINTS = [
@@ -439,6 +444,46 @@
     return THREE.MathUtils.lerp(50, 10, t) * D;
   }
 
+  function copyPose(pose) {
+    var copy = {};
+    JOINTS.forEach(function (joint) { copy[joint.id] = pose[joint.id]; });
+    return copy;
+  }
+
+  // Returns the lowest world-space Y of the arm centerline and jaw tips.
+  // The base yaw does not change height, so the chain stays in the X-Y plane.
+  function poseMinY(pose) {
+    var t5 = (500 - pose[5]) * UNIT * D;
+    var t4 = t5 + (pose[4] - 500) * UNIT * D;
+    var t3 = t4 + (500 - pose[3]) * UNIT * D;
+    var roll = (pose[2] - 500) * UNIT * D;
+    var y = BASE_HEIGHT;
+    var minY = y;
+
+    y += LINK.upperArm * Math.cos(t5);
+    minY = Math.min(minY, y);
+    y += LINK.forearm * Math.cos(t4);
+    minY = Math.min(minY, y);
+    y += LINK.wristPitchToRoll * Math.cos(t3);
+    minY = Math.min(minY, y);
+    y += LINK.rollToGripper * Math.cos(t3);
+    minY = Math.min(minY, y);
+
+    var jaw = jawHalfAngle(pose[1]);
+    var forward = LINK.finger * Math.cos(jaw);
+    var side = LINK.finger * Math.sin(jaw);
+    var localXy = Math.cos(roll) * Math.sin(t3);
+    var localYy = Math.cos(t3);
+    minY = Math.min(minY, y + forward * localYy - side * localXy);
+    minY = Math.min(minY, y + forward * localYy + side * localXy);
+    minY = Math.min(minY, y + LINK.finger * localYy);
+    return minY;
+  }
+
+  function poseCollides(pose) {
+    return poseMinY(pose) < TABLE_CLEARANCE;
+  }
+
   function applyState() {
     // Positive Y rotation is counterclockwise seen from above.
     baseYaw.rotation.y = (state[6] - 500) * UNIT * D;
@@ -583,6 +628,7 @@
   // Ease the solved pose into the model so a new IK branch does not snap.
   function stepIK() {
     if (!ikTargetPose) return;
+    var candidate = copyPose(state);
     var moving = false;
     for (var joint = 3; joint <= 6; joint++) {
       var target = ikTargetPose[joint];
@@ -592,16 +638,22 @@
       var delta = target - current;
       if (delta > step) delta = step;
       else if (delta < -step) delta = -step;
-      state[joint] = current + delta;
+      candidate[joint] = current + delta;
       moving = true;
     }
-    if (moving) {
-      syncUI();
-      applyState();
-      markTouched();
-    } else {
+    if (!moving) {
       ikTargetPose = null;
+      return;
     }
+    if (poseCollides(candidate)) {
+      ikTargetPose = null;
+      showLimit("桌面安全限制：已阻止夹爪继续下降");
+      return;
+    }
+    for (var j = 3; j <= 6; j++) state[j] = candidate[j];
+    syncUI();
+    applyState();
+    markTouched();
   }
 
   var valueLabels = {};
@@ -629,8 +681,17 @@
     input.value = joint.initial;
     input.title = joint.hint;
     input.addEventListener("input", function () {
+      var valueNumber = Number(input.value);
+      var candidate = copyPose(state);
+      candidate[joint.id] = valueNumber;
+      if (poseCollides(candidate)) {
+        input.value = state[joint.id];
+        value.textContent = state[joint.id];
+        showLimit("桌面安全限制：该角度会让夹爪或连杆低于桌面");
+        return;
+      }
       ikTargetPose = null;
-      state[joint.id] = Number(input.value);
+      state[joint.id] = valueNumber;
       value.textContent = input.value;
       applyState();
       markTouched();
@@ -653,16 +714,32 @@
   }
 
   var API_URL = "./api/pose";
+  var POLL_INTERVAL = 250;
   var syncEnabled = true;
   var syncTimer = null;
   var syncInFlight = false;
   var syncAgain = false;
-  var userTouched = false;
+  var pollTimer = null;
+  var pollInFlight = false;
+  var pollDelay = POLL_INTERVAL;
+  var lastSeq = null;
+  var lastUpdated = null;
+  var localLockUntil = 0;
+
+  var limitTimer = null;
 
   function setSyncState(text, mode) {
     var el = document.getElementById("syncState");
     el.textContent = text;
     el.className = "sync" + (mode ? " " + mode : "");
+  }
+
+  function showLimit(text) {
+    var el = document.getElementById("limit");
+    el.textContent = text;
+    el.hidden = false;
+    if (limitTimer) window.clearTimeout(limitTimer);
+    limitTimer = window.setTimeout(function () { el.hidden = true; }, 2200);
   }
 
   function queueSync() {
@@ -687,11 +764,16 @@
         if (!response.ok) throw new Error("HTTP " + response.status);
         return response.json();
       })
-      .then(function () {
+      .then(function (data) {
+        syncEnabled = true;
+        if (data && typeof data.seq === "number") lastSeq = data.seq;
+        if (data && typeof data.updated === "number") lastUpdated = data.updated;
         if (!syncAgain) setSyncState("已同步", "on");
       })
       .catch(function () {
         syncEnabled = false;
+        lastSeq = null;
+        lastUpdated = null;
         setSyncState("同步断开", "err");
       })
       .finally(function () {
@@ -701,29 +783,118 @@
   }
 
   function markTouched() {
-    userTouched = true;
+    localLockUntil = performance.now() + 300;
     queueSync();
   }
 
-  document.getElementById("reset").addEventListener("click", function () {
-    ikTargetPose = null;
+  function applyRemotePose(raw) {
+    var candidate = copyPose(state);
+    var changed = false;
     JOINTS.forEach(function (joint) {
-      state[joint.id] = THREE.MathUtils.clamp(STAND_POSE[joint.id], joint.min, joint.max);
+      if (!raw || raw[joint.id] === undefined) return;
+      var value = THREE.MathUtils.clamp(
+        Math.round(Number(raw[joint.id])), joint.min, joint.max
+      );
+      candidate[joint.id] = value;
+      if (value !== state[joint.id]) changed = true;
     });
+    if (!changed) return "same";
+    if (poseCollides(candidate)) {
+      showLimit("服务器姿态低于桌面安全高度，已忽略");
+      return "unsafe";
+    }
+    ikTargetPose = null;
+    JOINTS.forEach(function (joint) { state[joint.id] = candidate[joint.id]; });
+    syncUI();
+    applyState();
+    return "changed";
+  }
+
+  function schedulePoll() {
+    if (pollTimer) window.clearTimeout(pollTimer);
+    pollTimer = window.setTimeout(pollPose, pollDelay);
+  }
+
+  function pollPose() {
+    pollTimer = null;
+    if (pollInFlight) return;
+    if (syncInFlight || draggingHandle || performance.now() < localLockUntil) {
+      pollDelay = POLL_INTERVAL;
+      schedulePoll();
+      return;
+    }
+
+    pollInFlight = true;
+    var controller = new AbortController();
+    var timeout = window.setTimeout(function () { controller.abort(); }, 2000);
+    fetch(API_URL, { cache: "no-store", signal: controller.signal })
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        syncEnabled = true;
+        pollDelay = POLL_INTERVAL;
+        if (syncInFlight || draggingHandle || performance.now() < localLockUntil) return;
+        var seq = data && typeof data.seq === "number" ? data.seq : null;
+        var updated = data && typeof data.updated === "number" ? data.updated : null;
+        if (seq !== null && lastSeq !== null && seq <= lastSeq) {
+          // A new server process starts again at seq 0; its timestamp moves
+          // forward, while a stale response from the old process does not.
+          if (!(updated !== null && lastUpdated !== null && updated > lastUpdated)) {
+            return;
+          }
+        }
+        var pose = data && data.pose ? data.pose : data;
+        if (seq !== null) lastSeq = seq;
+        if (updated !== null) lastUpdated = updated;
+        var result = applyRemotePose(pose);
+        if (result === "unsafe") {
+          markTouched();
+        } else if (result === "changed") {
+          setSyncState("已同步", "on");
+        }
+      })
+      .catch(function () {
+        if (!syncInFlight) {
+          syncEnabled = false;
+          pollDelay = 1000;
+          setSyncState("同步断开", "err");
+        }
+      })
+      .finally(function () {
+        window.clearTimeout(timeout);
+        pollInFlight = false;
+        schedulePoll();
+      });
+  }
+
+  function setPose(raw, label) {
+    var candidate = copyPose(state);
+    JOINTS.forEach(function (joint) {
+      if (raw[joint.id] !== undefined) {
+        candidate[joint.id] = THREE.MathUtils.clamp(
+          Number(raw[joint.id]), joint.min, joint.max
+        );
+      }
+    });
+    if (poseCollides(candidate)) {
+      showLimit("桌面安全限制：" + label + "会碰到桌面");
+      return;
+    }
+    ikTargetPose = null;
+    JOINTS.forEach(function (joint) { state[joint.id] = candidate[joint.id]; });
     syncUI();
     applyState();
     markTouched();
+  }
+
+  document.getElementById("reset").addEventListener("click", function () {
+    setPose(STAND_POSE, "初始姿态");
   });
 
   document.getElementById("pose").addEventListener("click", function () {
-    ikTargetPose = null;
-    var pose = { 1: 500, 2: 145, 3: 120, 4: 860, 5: 650, 6: 500 };
-    JOINTS.forEach(function (joint) {
-      state[joint.id] = THREE.MathUtils.clamp(pose[joint.id], joint.min, joint.max);
-    });
-    syncUI();
-    applyState();
-    markTouched();
+    setPose({ 1: 500, 2: 145, 3: 120, 4: 860, 5: 650, 6: 500 }, "弯曲姿态");
   });
 
   // Drag the gripper servo handle to solve joints 3/4/5/6.
@@ -762,7 +933,7 @@
 
     draggingHandle = true;
     ikTargetPose = null;
-    userTouched = true;
+    localLockUntil = performance.now() + 300;
     controls.enabled = false;
     renderer.domElement.style.cursor = "grabbing";
     renderer.domElement.setPointerCapture(event.pointerId);
@@ -832,26 +1003,33 @@
       return response.json();
     })
     .then(function (data) {
-      if (!userTouched) {
+      syncEnabled = true;
+      var seq = data && typeof data.seq === "number" ? data.seq : null;
+      var updated = data && typeof data.updated === "number" ? data.updated : null;
+      if (seq !== null && lastSeq !== null && seq <= lastSeq) {
+        if (!(updated !== null && lastUpdated !== null && updated > lastUpdated)) {
+          setSyncState("已同步", "on");
+          return;
+        }
+      }
+      if (seq !== null) lastSeq = seq;
+      if (updated !== null) lastUpdated = updated;
+      if (!draggingHandle && performance.now() >= localLockUntil) {
         var pose = data && data.pose ? data.pose : data;
-        JOINTS.forEach(function (joint) {
-          if (pose && pose[joint.id] !== undefined) {
-            state[joint.id] = THREE.MathUtils.clamp(
-              Number(pose[joint.id]),
-              joint.min,
-              joint.max
-            );
-          }
-        });
-        syncUI();
-        applyState();
-        setSyncState("已同步", "on");
+        var result = applyRemotePose(pose);
+        if (result === "unsafe") {
+          markTouched();
+        } else {
+          setSyncState("已同步", "on");
+        }
       }
     })
     .catch(function () {
       syncEnabled = false;
+      pollDelay = 1000;
       setSyncState("本地模式", "");
-    });
+    })
+    .finally(schedulePoll);
 
   function animate() {
     requestAnimationFrame(animate);
