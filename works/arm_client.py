@@ -84,11 +84,19 @@ def apply_pose(uart, pose, previous=None):
     ]
     if changed:
         check_uart(uart)
-        # Matches the complete single-frame action used by vendor stand.
-        row = tuple(pose[joint] for joint in range(1, 7)) + (0,)
-        uart.setArmActions((row,))
+        # The controller slows down when it receives a stream of separate
+        # one-row actions. Send a complete two-row group instead, matching
+        # the vendor presets: the previous target first, then the new one.
+        rows = [tuple(pose[joint] for joint in range(1, 7)) + (0,)]
+        if previous is not None:
+            rows.insert(
+                0, tuple(previous[joint] for joint in range(1, 7)) + (0,)
+            )
+        else:
+            rows.append(rows[0])
+        uart.setArmActions(tuple(rows))
         print(
-            f"[Apply] {format_pose(pose)}  changed={changed}  action=1 wait=0",
+            f"[Apply] {format_pose(pose)}  changed={changed}  rows=2 wait=0",
             flush=True,
         )
     return changed
@@ -200,10 +208,7 @@ def run_arm(args, base, target_pose):
                 time.sleep(1.0)
                 continue
 
-            # A new action replaces the previous target. Sending one every
-            # poll restarts small moves constantly, so wait for the local
-            # action window and then send only the latest pose.
-            if pose != last and not uart.getArmActionsBusy():
+            if pose != last:
                 apply_pose(uart, pose, last)
                 last = pose
             time.sleep(delay)

@@ -723,6 +723,7 @@
   var pollInFlight = false;
   var pollDelay = POLL_INTERVAL;
   var lastSeq = null;
+  var lastUpdated = null;
   var localLockUntil = 0;
 
   var limitTimer = null;
@@ -766,11 +767,13 @@
       .then(function (data) {
         syncEnabled = true;
         if (data && typeof data.seq === "number") lastSeq = data.seq;
+        if (data && typeof data.updated === "number") lastUpdated = data.updated;
         if (!syncAgain) setSyncState("已同步", "on");
       })
       .catch(function () {
         syncEnabled = false;
         lastSeq = null;
+        lastUpdated = null;
         setSyncState("同步断开", "err");
       })
       .finally(function () {
@@ -834,9 +837,17 @@
         pollDelay = POLL_INTERVAL;
         if (syncInFlight || draggingHandle || performance.now() < localLockUntil) return;
         var seq = data && typeof data.seq === "number" ? data.seq : null;
-        if (seq !== null && lastSeq !== null && seq <= lastSeq) return;
+        var updated = data && typeof data.updated === "number" ? data.updated : null;
+        if (seq !== null && lastSeq !== null && seq <= lastSeq) {
+          // A new server process starts again at seq 0; its timestamp moves
+          // forward, while a stale response from the old process does not.
+          if (!(updated !== null && lastUpdated !== null && updated > lastUpdated)) {
+            return;
+          }
+        }
         var pose = data && data.pose ? data.pose : data;
         if (seq !== null) lastSeq = seq;
+        if (updated !== null) lastUpdated = updated;
         var result = applyRemotePose(pose);
         if (result === "unsafe") {
           markTouched();
@@ -994,11 +1005,15 @@
     .then(function (data) {
       syncEnabled = true;
       var seq = data && typeof data.seq === "number" ? data.seq : null;
+      var updated = data && typeof data.updated === "number" ? data.updated : null;
       if (seq !== null && lastSeq !== null && seq <= lastSeq) {
-        setSyncState("已同步", "on");
-        return;
+        if (!(updated !== null && lastUpdated !== null && updated > lastUpdated)) {
+          setSyncState("已同步", "on");
+          return;
+        }
       }
       if (seq !== null) lastSeq = seq;
+      if (updated !== null) lastUpdated = updated;
       if (!draggingHandle && performance.now() >= localLockUntil) {
         var pose = data && data.pose ? data.pose : data;
         var result = applyRemotePose(pose);
