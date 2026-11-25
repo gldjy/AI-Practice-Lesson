@@ -200,7 +200,10 @@ def run_arm(args, base, target_pose):
                 time.sleep(1.0)
                 continue
 
-            if pose != last:
+            # A new action replaces the previous target. Sending one every
+            # poll restarts small moves constantly, so wait for the local
+            # action window and then send only the latest pose.
+            if pose != last and not uart.getArmActionsBusy():
                 apply_pose(uart, pose, last)
                 last = pose
             time.sleep(delay)
