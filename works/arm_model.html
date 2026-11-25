@@ -125,6 +125,12 @@
     font-size: 10.5px;
     line-height: 1.6;
   }
+  .hint {
+    margin: 10px 0 0;
+    color: var(--accent);
+    font-size: 10.5px;
+    line-height: 1.6;
+  }
   .tip {
     position: fixed;
     right: 16px;
@@ -170,12 +176,13 @@
     <button id="pose">弯曲姿态</button>
     <button id="grip">夹爪 640</button>
   </div>
+  <p class="hint">拖动夹爪舵机上的青色光环，自动解算 3/4/5/6 号并平滑跟随；松开后同步给 client。</p>
   <p class="note">
-    连杆长度按 ArmParam.md 的旋转中心距离绘制。底座立柱高度和连杆截面是显示估值，舵机体积已简化。通过 arm_server.py 打开时，滑杆变化会同步给 arm_client.py。
+    连杆长度按 ArmParam.md 的旋转中心距离绘制。底座立柱高度和连杆截面是显示估值，舵机体积已简化。模型只做关节限位，不检查箱体或线缆碰撞。初始姿态使用安全 stand（2 号 145，6 号 490）。通过 arm_server.py 打开时，滑杆变化会同步给 arm_client.py。
   </p>
 </div>
 
-<div class="tip">拖动旋转 · 滚轮缩放 · 右键平移</div>
+<div class="tip">拖动旋转 · 滚轮缩放 · 右键平移 · 拖青色光环解算</div>
 <div id="error" hidden></div>
 
 <script>
@@ -207,15 +214,20 @@
     finger: 58
   };
 
+  // Visual mount height from the table to the shoulder axis.
+  var BASE_HEIGHT = 26;
+
   // Keep in sync with arm_params.py.
   var JOINTS = [
     { id: 1, name: "夹爪", min: 500, max: 665, initial: 500, hint: "增大夹紧，640 适合夹方块" },
-    { id: 2, name: "腕部旋转", min: 145, max: 500, initial: 500, hint: "增大逆时针，上限待测" },
+    { id: 2, name: "腕部旋转", min: 145, max: 500, initial: 145, hint: "增大逆时针，上限待测；大角度旋转注意摄像头线" },
     { id: 3, name: "腕部俯仰", min: 120, max: 500, initial: 500, hint: "减小内缩，120 垂直折下" },
     { id: 4, name: "小臂", min: 500, max: 860, initial: 500, hint: "增大内收，860 垂直折下" },
     { id: 5, name: "大臂", min: 150, max: 740, initial: 500, hint: "减小内收，500 与桌面垂直" },
-    { id: 6, name: "底座", min: 140, max: 860, initial: 500, hint: "增大逆时针，500 与传送带平行" }
+    { id: 6, name: "底座", min: 140, max: 860, initial: 490, hint: "增大逆时针，500 与传送带平行" }
   ];
+
+  var STAND_POSE = { 1: 500, 2: 145, 3: 500, 4: 500, 5: 500, 6: 490 };
 
   // Degrees per protocol unit. 0~1000 maps to 0~240 degrees.
   var UNIT = 0.24;
@@ -345,14 +357,14 @@
   baseYaw.add(neck);
 
   var offset = new THREE.Mesh(new THREE.BoxGeometry(LINK.baseToShoulder, 10, 14), mat.base);
-  offset.position.set(LINK.baseToShoulder / 2, 26, 0);
+  offset.position.set(LINK.baseToShoulder / 2, BASE_HEIGHT, 0);
   offset.castShadow = true;
   offset.receiveShadow = true;
   baseYaw.add(offset);
 
   // Joint 5: shoulder pitch. Value below 500 tilts inward, toward -X.
   var shoulder = new THREE.Group();
-  shoulder.position.set(LINK.baseToShoulder, 26, 0);
+  shoulder.position.set(LINK.baseToShoulder, BASE_HEIGHT, 0);
   baseYaw.add(shoulder);
   shoulder.add(jointPuck(11, 16, "z"));
   shoulder.add(box(LINK.upperArm, 24, 15, mat.link));
@@ -406,6 +418,23 @@
   gripper.add(jawLeft);
   gripper.add(jawRight);
 
+  // Draggable handle at the gripper servo rotation center.
+  var handleGroup = new THREE.Group();
+  gripper.add(handleGroup);
+
+  var handleRing = new THREE.Mesh(
+    new THREE.TorusGeometry(13, 1.6, 10, 40),
+    new THREE.MeshBasicMaterial({ color: 0x39d0ff })
+  );
+  handleRing.rotation.x = Math.PI / 2;
+  handleGroup.add(handleRing);
+
+  var handleHit = new THREE.Mesh(
+    new THREE.SphereGeometry(18, 16, 12),
+    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
+  );
+  handleGroup.add(handleHit);
+
   function jawHalfAngle(value) {
     var t = THREE.MathUtils.clamp((value - 500) / (665 - 500), 0, 1);
     return THREE.MathUtils.lerp(50, 10, t) * D;
@@ -424,6 +453,160 @@
     var jaw = jawHalfAngle(state[1]);
     jawLeft.rotation.z = jaw;
     jawRight.rotation.z = -jaw;
+  }
+
+  // The wrist roll does not move the gripper servo center, so the position
+  // chain ends with the 65 mm wrist link plus the 50 mm gripper mount.
+  var IK_LAST = LINK.wristPitchToRoll + LINK.rollToGripper;
+  var MAX_REACH = LINK.upperArm + LINK.forearm + IK_LAST;
+  var ikTargetPose = null;
+  var ikSyncPending = false;
+
+  function clampValue(value, low, high) {
+    return Math.max(low, Math.min(high, value));
+  }
+
+  function planarEnd(phi5, bend4, bend3) {
+    var phi4 = phi5 + bend4;
+    var phi3 = phi4 + bend3;
+    return {
+      x: LINK.upperArm * Math.cos(phi5)
+        + LINK.forearm * Math.cos(phi4)
+        + IK_LAST * Math.cos(phi3),
+      y: LINK.upperArm * Math.sin(phi5)
+        + LINK.forearm * Math.sin(phi4)
+        + IK_LAST * Math.sin(phi3)
+    };
+  }
+
+  function solveIK(target) {
+    // Turn the base toward the target, but do not flip to the opposite limit
+    // when the target crosses behind the base.
+    var yawDeg = Math.atan2(-target.z, target.x) / D;
+    var yawMin = (JOINTS[5].min - 500) * UNIT;
+    var yawMax = (JOINTS[5].max - 500) * UNIT;
+    var joint6 = state[6];
+    if (yawDeg >= yawMin && yawDeg <= yawMax) {
+      joint6 = clampValue(
+        Math.round(500 + yawDeg / UNIT),
+        JOINTS[5].min,
+        JOINTS[5].max
+      );
+    }
+    var yaw = (joint6 - 500) * UNIT * D;
+    var forwardX = Math.cos(yaw);
+    var forwardZ = -Math.sin(yaw);
+
+    var tx = target.x * forwardX + target.z * forwardZ - LINK.baseToShoulder;
+    var ty = target.y - BASE_HEIGHT;
+    ty = Math.max(ty, 10 - BASE_HEIGHT);
+
+    var radius = Math.sqrt(tx * tx + ty * ty);
+    if (radius > MAX_REACH) {
+      tx *= MAX_REACH / radius;
+      ty *= MAX_REACH / radius;
+      radius = MAX_REACH;
+    }
+
+    var phi5 = (90 + (500 - state[5]) * UNIT) * D;
+    var bend4 = (state[4] - 500) * UNIT * D;
+    var bend3 = (500 - state[3]) * UNIT * D;
+    if (bend4 < 0.02 && radius < MAX_REACH - 1) {
+      // Break the straight-arm singularity; a pure radial error has no
+      // first-order gradient at an exactly straight elbow.
+      bend4 = 0.02;
+    }
+
+    var phi5Min = (90 + (500 - JOINTS[4].max) * UNIT) * D;
+    var phi5Max = (90 + (500 - JOINTS[4].min) * UNIT) * D;
+    var bend4Max = (JOINTS[3].max - 500) * UNIT * D;
+    var bend3Max = (500 - JOINTS[2].min) * UNIT * D;
+    var damping2 = 100;
+
+    for (var iteration = 0; iteration < 120; iteration++) {
+      var end = planarEnd(phi5, bend4, bend3);
+      var errorX = tx - end.x;
+      var errorY = ty - end.y;
+      if (Math.sqrt(errorX * errorX + errorY * errorY) < 0.5) break;
+
+      var phi4 = phi5 + bend4;
+      var elbowX = LINK.upperArm * Math.cos(phi5);
+      var elbowY = LINK.upperArm * Math.sin(phi5);
+      var wristX = elbowX + LINK.forearm * Math.cos(phi4);
+      var wristY = elbowY + LINK.forearm * Math.sin(phi4);
+
+      var j5x = -end.y;
+      var j5y = end.x;
+      var j4x = -(end.y - elbowY);
+      var j4y = end.x - elbowX;
+      var j3x = -(end.y - wristY);
+      var j3y = end.x - wristX;
+
+      var a00 = j5x * j5x + j4x * j4x + j3x * j3x + damping2;
+      var a01 = j5x * j5y + j4x * j4y + j3x * j3y;
+      var a11 = j5y * j5y + j4y * j4y + j3y * j3y + damping2;
+      var det = a00 * a11 - a01 * a01;
+      if (Math.abs(det) < 1e-9) break;
+
+      var ux = (a11 * errorX - a01 * errorY) / det;
+      var uy = (-a01 * errorX + a00 * errorY) / det;
+      var d5 = j5x * ux + j5y * uy;
+      var d4 = j4x * ux + j4y * uy;
+      var d3 = j3x * ux + j3y * uy;
+
+      var maxStep = 0.2;
+      var step = Math.max(Math.abs(d5), Math.abs(d4), Math.abs(d3));
+      if (step > maxStep) {
+        var scale = maxStep / step;
+        d5 *= scale;
+        d4 *= scale;
+        d3 *= scale;
+      }
+
+      phi5 = clampValue(phi5 + d5, phi5Min, phi5Max);
+      bend4 = clampValue(bend4 + d4, 0, bend4Max);
+      bend3 = clampValue(bend3 + d3, 0, bend3Max);
+    }
+
+    ikTargetPose = {
+      3: Math.round(clampValue(
+        500 - (bend3 / D) / UNIT, JOINTS[2].min, JOINTS[2].max
+      )),
+      4: Math.round(clampValue(
+        500 + (bend4 / D) / UNIT, JOINTS[3].min, JOINTS[3].max
+      )),
+      5: Math.round(clampValue(
+        500 - (phi5 / D - 90) / UNIT, JOINTS[4].min, JOINTS[4].max
+      )),
+      6: joint6
+    };
+  }
+
+  // Ease the solved pose into the model so a new IK branch does not snap.
+  function stepIK() {
+    if (!ikTargetPose) return;
+    var moving = false;
+    for (var joint = 3; joint <= 6; joint++) {
+      var target = ikTargetPose[joint];
+      var current = state[joint];
+      if (current === target) continue;
+      var step = joint === 6 ? 6 : 8;
+      var delta = target - current;
+      if (delta > step) delta = step;
+      else if (delta < -step) delta = -step;
+      state[joint] = current + delta;
+      moving = true;
+    }
+    if (moving) {
+      syncUI();
+      applyState();
+    } else {
+      ikTargetPose = null;
+      if (ikSyncPending) {
+        ikSyncPending = false;
+        markTouched();
+      }
+    }
   }
 
   var valueLabels = {};
@@ -527,7 +710,7 @@
 
   document.getElementById("reset").addEventListener("click", function () {
     JOINTS.forEach(function (joint) {
-      state[joint.id] = THREE.MathUtils.clamp(500, joint.min, joint.max);
+      state[joint.id] = THREE.MathUtils.clamp(STAND_POSE[joint.id], joint.min, joint.max);
     });
     syncUI();
     applyState();
@@ -535,7 +718,7 @@
   });
 
   document.getElementById("pose").addEventListener("click", function () {
-    var pose = { 1: 500, 2: 500, 3: 120, 4: 860, 5: 650, 6: 500 };
+    var pose = { 1: 500, 2: 145, 3: 120, 4: 860, 5: 650, 6: 500 };
     JOINTS.forEach(function (joint) {
       state[joint.id] = THREE.MathUtils.clamp(pose[joint.id], joint.min, joint.max);
     });
@@ -550,6 +733,105 @@
     applyState();
     markTouched();
   });
+
+  // Drag the gripper servo handle to solve joints 3/4/5/6.
+  var raycaster = new THREE.Raycaster();
+  var pointer = new THREE.Vector2();
+  var dragPlane = new THREE.Plane();
+  var draggingHandle = false;
+  var targetMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(4, 12, 8),
+    new THREE.MeshBasicMaterial({
+      color: 0x39d0ff,
+      transparent: true,
+      opacity: 0.85,
+      depthTest: false
+    })
+  );
+  targetMarker.renderOrder = 10;
+  targetMarker.visible = false;
+  scene.add(targetMarker);
+
+  function updatePointer(event) {
+    var rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  }
+
+  function hitHandle() {
+    raycaster.setFromCamera(pointer, camera);
+    return raycaster.intersectObject(handleHit, false).length > 0;
+  }
+
+  function onPointerDown(event) {
+    if (event.button !== 0 || !event.isPrimary) return;
+    updatePointer(event);
+    if (!hitHandle()) return;
+
+    draggingHandle = true;
+    controls.enabled = false;
+    renderer.domElement.style.cursor = "grabbing";
+    renderer.domElement.setPointerCapture(event.pointerId);
+    if (syncEnabled) setSyncState("拖动中", "");
+
+    var start = handleGroup.getWorldPosition(new THREE.Vector3());
+    var normal = camera.getWorldDirection(new THREE.Vector3());
+    dragPlane.setFromNormalAndCoplanarPoint(normal, start);
+    targetMarker.position.copy(start);
+    targetMarker.visible = true;
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function onPointerMove(event) {
+    updatePointer(event);
+
+    if (!draggingHandle) {
+      renderer.domElement.style.cursor = hitHandle() ? "grab" : "default";
+      return;
+    }
+
+    raycaster.setFromCamera(pointer, camera);
+    var point = new THREE.Vector3();
+    if (!raycaster.ray.intersectPlane(dragPlane, point)) return;
+
+    point.y = Math.max(point.y, 10);
+    targetMarker.position.copy(point);
+    solveIK(point);
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function onPointerUp(event) {
+    if (!draggingHandle) return;
+
+    draggingHandle = false;
+    controls.enabled = true;
+    renderer.domElement.style.cursor = "default";
+    targetMarker.visible = false;
+    try {
+      renderer.domElement.releasePointerCapture(event.pointerId);
+    } catch (error) {
+      // The pointer may already be released.
+    }
+    if (ikTargetPose) {
+      ikSyncPending = true;
+    } else {
+      markTouched();
+    }
+    if (syncEnabled) setSyncState("同步中", "");
+    else setSyncState("本地模式", "");
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  renderer.domElement.addEventListener("pointerdown", onPointerDown, { capture: true });
+  renderer.domElement.addEventListener("pointermove", onPointerMove, { capture: true });
+  renderer.domElement.addEventListener("pointerup", onPointerUp, { capture: true });
+  renderer.domElement.addEventListener("pointercancel", onPointerUp, { capture: true });
 
   window.addEventListener("resize", function () {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -589,6 +871,7 @@
 
   function animate() {
     requestAnimationFrame(animate);
+    stepIK();
     controls.update();
     renderer.render(scene, camera);
   }

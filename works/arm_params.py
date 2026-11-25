@@ -7,13 +7,14 @@ Keep the ranges in sync with the JOINTS table in arm_model.html.
 
 JOINTS = [
     {"id": 1, "name": "夹爪", "min": 500, "max": 665, "initial": 500},
-    {"id": 2, "name": "腕部旋转", "min": 145, "max": 500, "initial": 500},
+    {"id": 2, "name": "腕部旋转", "min": 145, "max": 500, "initial": 145},
     {"id": 3, "name": "腕部俯仰", "min": 120, "max": 500, "initial": 500},
     {"id": 4, "name": "小臂", "min": 500, "max": 860, "initial": 500},
     {"id": 5, "name": "大臂", "min": 150, "max": 740, "initial": 500},
-    {"id": 6, "name": "底座", "min": 140, "max": 860, "initial": 500},
+    {"id": 6, "name": "底座", "min": 140, "max": 860, "initial": 490},
 ]
 
+# The defaults form the upright stand pose, kept inside the measured ranges.
 LIMITS = {item["id"]: (item["min"], item["max"]) for item in JOINTS}
 DEFAULT_POSE = {item["id"]: item["initial"] for item in JOINTS}
 

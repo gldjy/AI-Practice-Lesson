@@ -16,7 +16,7 @@ import time
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from arm_params import format_pose, normalize_pose
+from arm_params import DEFAULT_POSE, format_pose, normalize_pose
 
 APPLY_LOG_INTERVAL = 0.5
 last_apply_log = 0.0
@@ -84,6 +84,42 @@ def apply_pose(uart, pose, previous=None):
     return changed
 
 
+def apply_pose_group(uart, pose, wait_ms=1500):
+    """Sends the whole pose as one coordinated action group."""
+    row = tuple(pose[joint] for joint in range(1, 7)) + (wait_ms,)
+    uart.setArmActions((row,))
+    deadline = time.time() + wait_ms / 1000.0 + 3.0
+    while uart.getArmActionsBusy() and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(1.5)
+
+
+GROUP_DELTA = 100
+
+
+def needs_group(previous, pose):
+    """Returns True for multi-joint or large single-joint moves."""
+    if previous is None:
+        return True
+    changed = [
+        joint for joint in sorted(pose) if pose[joint] != previous.get(joint)
+    ]
+    if not changed:
+        return False
+    return len(changed) > 1 or max(
+        abs(pose[joint] - previous[joint]) for joint in changed
+    ) >= GROUP_DELTA
+
+
+def large_deltas(pose):
+    """Returns joints that are far from the safe stand pose."""
+    return {
+        joint: pose[joint] - DEFAULT_POSE[joint]
+        for joint in sorted(pose)
+        if abs(pose[joint] - DEFAULT_POSE[joint]) >= GROUP_DELTA
+    }
+
+
 def run_dry(base, rate, last):
     """Prints pose changes without opening the serial port."""
     delay = 1.0 / rate
@@ -122,8 +158,8 @@ def run_arm(args, base):
         time.sleep(0.5)
 
         pose = fetch_pose(base)
-        print(f"[Info] 应用初始姿态: {format_pose(pose)}")
-        apply_pose(uart, pose)
+        print(f"[Info] 应用初始姿态(动作组): {format_pose(pose)}")
+        apply_pose_group(uart, pose)
         last = pose
         lost = False
         delay = 1.0 / args.rate
@@ -142,7 +178,11 @@ def run_arm(args, base):
                 continue
 
             if pose != last:
-                apply_pose(uart, pose, last)
+                if needs_group(last, pose):
+                    print("[Info] 多关节或大角度变化，使用动作组")
+                    apply_pose_group(uart, pose)
+                else:
+                    apply_pose(uart, pose, last)
                 last = pose
             time.sleep(delay)
     except Exception as exc:
@@ -183,6 +223,15 @@ def main():
         return 0
     print(f"[Info] 服务器姿态: {format_pose(pose)}")
 
+    deltas = large_deltas(pose)
+    if deltas:
+        detail = ", ".join(
+            f"{joint}号 {delta:+d} ({abs(delta) * 0.24:.0f}°)"
+            for joint, delta in deltas.items()
+        )
+        print(f"[Warning] 初始姿态与安全 stand 差异较大: {detail}")
+        print("[Warning] 这里假设机械臂当前在 stand，直接应用可能撞到箱子或拉紧线缆。")
+
     if args.dry_run:
         print("[Info] dry-run，不打开串口")
         try:
@@ -192,14 +241,23 @@ def main():
         return 0
 
     if not args.yes:
-        print("[Warning] 机械臂会移动到上面的姿态，请确认周围安全。")
-        try:
-            answer = input("将这组角度应用到机械臂? [Y/n] ").strip().lower()
-        except EOFError:
-            answer = "n"
-        if answer == "n":
-            print("[Info] 已取消")
-            return 0
+        if deltas:
+            try:
+                answer = input("仍然应用? [y/N] ").strip().lower()
+            except EOFError:
+                answer = "n"
+            if answer != "y":
+                print("[Info] 已取消")
+                return 0
+        else:
+            print("[Warning] 机械臂会移动到上面的姿态，请确认周围安全。")
+            try:
+                answer = input("将这组角度应用到机械臂? [Y/n] ").strip().lower()
+            except EOFError:
+                answer = "n"
+            if answer == "n":
+                print("[Info] 已取消")
+                return 0
 
     try:
         return run_arm(args, base)
