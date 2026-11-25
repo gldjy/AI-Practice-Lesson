@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>机械臂模型</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b1017;
+    --panel: rgba(16, 23, 33, 0.92);
+    --line: rgba(255, 255, 255, 0.09);
+    --text: #dfe7f3;
+    --muted: #8d9bb0;
+    --accent: #6ea8fe;
+    --accent2: #f0a35e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+  }
+  canvas { display: block; }
+  #hud {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    z-index: 10;
+    width: 300px;
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    padding: 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  }
+  #hud h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .sync {
+    padding: 2px 7px;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .sync.on {
+    color: #8ee6a8;
+    border-color: rgba(142, 230, 168, 0.35);
+    background: rgba(142, 230, 168, 0.08);
+  }
+  .sync.err {
+    color: #ff9f9f;
+    border-color: rgba(255, 120, 120, 0.35);
+  }
+  .sub {
+    margin: 0 0 14px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .ctrl {
+    display: grid;
+    grid-template-columns: 70px 38px 1fr;
+    gap: 8px;
+    align-items: center;
+    margin: 9px 0;
+  }
+  .ctrl .name {
+    font-size: 12px;
+    color: #c7d3e3;
+    white-space: nowrap;
+  }
+  .ctrl .val {
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent2);
+    text-align: right;
+  }
+  input[type="range"] {
+    width: 100%;
+    height: 4px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .btns {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  button {
+    flex: 1;
+    padding: 7px 8px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: rgba(110, 168, 254, 0.12);
+    border: 1px solid rgba(110, 168, 254, 0.35);
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  button:hover {
+    background: rgba(110, 168, 254, 0.22);
+  }
+  .note {
+    margin: 12px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 1.6;
+  }
+  .tip {
+    position: fixed;
+    right: 16px;
+    bottom: 14px;
+    z-index: 10;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  #error {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    z-index: 20;
+    transform: translateX(-50%);
+    padding: 10px 14px;
+    color: #ffd7dc;
+    background: #4a1d24;
+    border: 1px solid #a33b48;
+    border-radius: 8px;
+    font-size: 12px;
+  }
+  @media (max-width: 640px) {
+    #hud {
+      top: 12px;
+      left: 12px;
+      width: calc(100vw - 24px);
+    }
+    .tip { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="head">
+    <h1>机械臂模型</h1>
+    <span id="syncState" class="sync">本地模式</span>
+  </div>
+  <p class="sub">尺寸单位 mm · 角度 0~1000 对应 0~240°</p>
+  <div id="controls"></div>
+  <div class="btns">
+    <button id="reset">初始姿态</button>
+    <button id="pose">弯曲姿态</button>
+    <button id="grip">夹爪 640</button>
+  </div>
+  <p class="note">
+    连杆长度按 ArmParam.md 的旋转中心距离绘制。底座立柱高度和连杆截面是显示估值，舵机体积已简化。通过 arm_server.py 打开时，滑杆变化会同步给 arm_client.py。
+  </p>
+</div>
+
+<div class="tip">拖动旋转 · 滚轮缩放 · 右键平移</div>
+<div id="error" hidden></div>
+
+<script>
+  window.addEventListener("error", function (event) {
+    var el = document.getElementById("error");
+    el.hidden = false;
+    el.textContent = "模型加载失败: " + (event.message || "未知错误");
+  });
+</script>
+
+<!-- three.js r147, MIT License, https://threejs.org -->
+<script src="./res/js/three.min.js"></script>
+<script src="./res/js/OrbitControls.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  if (!window.THREE) {
+    throw new Error("three.js 未加载，请检查 res/js 目录");
+  }
+
+  // Link lengths in mm, measured between rotation centers (see ArmParam.md).
+  var LINK = {
+    baseToShoulder: 10,
+    upperArm: 110,
+    forearm: 88,
+    wristPitchToRoll: 65,
+    rollToGripper: 50,
+    finger: 58
+  };
+
+  // Keep in sync with arm_params.py.
+  var JOINTS = [
+    { id: 1, name: "夹爪", min: 500, max: 665, initial: 500, hint: "增大夹紧，640 适合夹方块" },
+    { id: 2, name: "腕部旋转", min: 145, max: 500, initial: 500, hint: "增大逆时针，上限待测" },
+    { id: 3, name: "腕部俯仰", min: 120, max: 500, initial: 500, hint: "减小内缩，120 垂直折下" },
+    { id: 4, name: "小臂", min: 500, max: 860, initial: 500, hint: "增大内收，860 垂直折下" },
+    { id: 5, name: "大臂", min: 150, max: 740, initial: 500, hint: "减小内收，500 与桌面垂直" },
+    { id: 6, name: "底座", min: 140, max: 860, initial: 500, hint: "增大逆时针，500 与传送带平行" }
+  ];
+
+  // Degrees per protocol unit. 0~1000 maps to 0~240 degrees.
+  var UNIT = 0.24;
+  var D = Math.PI / 180;
+  var state = {};
+  JOINTS.forEach(function (joint) { state[joint.id] = joint.initial; });
+
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1017);
+
+  var camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 3000);
+  camera.position.set(430, 340, 500);
+
+  var renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+
+  var controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 195, 0);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 180;
+  controls.maxDistance = 1200;
+  controls.maxPolarAngle = Math.PI * 0.495;
+  controls.update();
+
+  scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x152030, 0.85));
+
+  var keyLight = new THREE.DirectionalLight(0xffffff, 1.6);
+  keyLight.position.set(220, 420, 260);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(2048, 2048);
+  keyLight.shadow.camera.left = -320;
+  keyLight.shadow.camera.right = 320;
+  keyLight.shadow.camera.top = 320;
+  keyLight.shadow.camera.bottom = -320;
+  keyLight.shadow.camera.near = 10;
+  keyLight.shadow.camera.far = 1200;
+  keyLight.shadow.bias = -0.0008;
+  keyLight.target.position.set(0, 180, 0);
+  scene.add(keyLight);
+  scene.add(keyLight.target);
+
+  var rimLight = new THREE.DirectionalLight(0x5f8fd6, 0.6);
+  rimLight.position.set(-260, 220, -220);
+  scene.add(rimLight);
+
+  var shadowPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(600, 600),
+    new THREE.ShadowMaterial({ opacity: 0.32 })
+  );
+  shadowPlane.rotation.x = -Math.PI / 2;
+  shadowPlane.position.y = -0.2;
+  shadowPlane.receiveShadow = true;
+  scene.add(shadowPlane);
+
+  var grid = new THREE.GridHelper(600, 30, 0x35445a, 0x1f2a38);
+  grid.position.y = 0.2;
+  grid.material.transparent = true;
+  grid.material.opacity = 0.6;
+  scene.add(grid);
+
+  var mat = {
+    base: new THREE.MeshStandardMaterial({ color: 0x2f3a48, roughness: 0.55, metalness: 0.35 }),
+    link: new THREE.MeshStandardMaterial({ color: 0x5e93e8, roughness: 0.42, metalness: 0.28 }),
+    linkAlt: new THREE.MeshStandardMaterial({ color: 0x4676bf, roughness: 0.45, metalness: 0.3 }),
+    joint: new THREE.MeshStandardMaterial({ color: 0xe09a54, roughness: 0.4, metalness: 0.5 }),
+    finger: new THREE.MeshStandardMaterial({ color: 0xc8d3e2, roughness: 0.42, metalness: 0.35 }),
+    pad: new THREE.MeshStandardMaterial({ color: 0x202833, roughness: 0.7, metalness: 0.2 })
+  };
+
+  function box(length, width, depth, material) {
+    var mesh = new THREE.Mesh(new THREE.BoxGeometry(width, length, depth), material);
+    mesh.position.y = length / 2;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.add(new THREE.LineSegments(
+      new THREE.EdgesGeometry(mesh.geometry),
+      new THREE.LineBasicMaterial({ color: 0x0a0f16, transparent: true, opacity: 0.45 })
+    ));
+    return mesh;
+  }
+
+  function jointPuck(radius, height, axis, material) {
+    var mesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius, radius, height, 32),
+      material || mat.joint
+    );
+    if (axis === "z") mesh.rotation.x = Math.PI / 2;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
+  }
+
+  // Static base plate.
+  var basePlate = new THREE.Mesh(new THREE.CylinderGeometry(30, 34, 6, 48), mat.base);
+  basePlate.position.y = 3;
+  basePlate.castShadow = true;
+  basePlate.receiveShadow = true;
+  scene.add(basePlate);
+
+  // Everything above the base plate turns with joint 6.
+  var baseYaw = new THREE.Group();
+  scene.add(baseYaw);
+
+  var turret = new THREE.Mesh(new THREE.CylinderGeometry(26, 29, 12, 48), mat.base);
+  turret.position.y = 12;
+  turret.castShadow = true;
+  turret.receiveShadow = true;
+  baseYaw.add(turret);
+
+  var ring = new THREE.Mesh(new THREE.TorusGeometry(28, 1.2, 8, 48), mat.joint);
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 6.2;
+  baseYaw.add(ring);
+
+  var neck = new THREE.Mesh(new THREE.CylinderGeometry(10, 12, 8, 24), mat.base);
+  neck.position.y = 22;
+  neck.castShadow = true;
+  neck.receiveShadow = true;
+  baseYaw.add(neck);
+
+  var offset = new THREE.Mesh(new THREE.BoxGeometry(LINK.baseToShoulder, 10, 14), mat.base);
+  offset.position.set(LINK.baseToShoulder / 2, 26, 0);
+  offset.castShadow = true;
+  offset.receiveShadow = true;
+  baseYaw.add(offset);
+
+  // Joint 5: shoulder pitch. Value below 500 tilts inward, toward -X.
+  var shoulder = new THREE.Group();
+  shoulder.position.set(LINK.baseToShoulder, 26, 0);
+  baseYaw.add(shoulder);
+  shoulder.add(jointPuck(11, 16, "z"));
+  shoulder.add(box(LINK.upperArm, 24, 15, mat.link));
+
+  // Joint 4: elbow. Value above 500 folds inward, toward -X.
+  var elbow = new THREE.Group();
+  elbow.position.y = LINK.upperArm;
+  shoulder.add(elbow);
+  elbow.add(jointPuck(10, 15, "z"));
+  elbow.add(box(LINK.forearm, 20, 13, mat.linkAlt));
+
+  // Joint 3: wrist pitch. Value below 500 folds down, toward -Y.
+  var wristPitch = new THREE.Group();
+  wristPitch.position.y = LINK.forearm;
+  elbow.add(wristPitch);
+  wristPitch.add(jointPuck(8.5, 13, "z"));
+  wristPitch.add(box(LINK.wristPitchToRoll, 16, 11, mat.link));
+
+  // Joint 2: wrist roll around the link axis.
+  var wristRoll = new THREE.Group();
+  wristRoll.position.y = LINK.wristPitchToRoll;
+  wristPitch.add(wristRoll);
+  wristRoll.add(jointPuck(10, 12, "y"));
+  wristRoll.add(box(LINK.rollToGripper, 12, 12, mat.linkAlt));
+
+  // Joint 1: gripper. The jaws are a visual approximation of the real linkage.
+  var gripper = new THREE.Group();
+  gripper.position.y = LINK.rollToGripper;
+  wristRoll.add(gripper);
+  gripper.add(jointPuck(10, 12, "y"));
+
+  var palm = new THREE.Mesh(new THREE.BoxGeometry(22, 12, 15), mat.base);
+  palm.position.y = 2;
+  palm.castShadow = true;
+  palm.receiveShadow = true;
+  gripper.add(palm);
+
+  function makeFinger() {
+    var finger = box(LINK.finger, 7, 10, mat.finger);
+    var pad = new THREE.Mesh(new THREE.BoxGeometry(8, 10, 12), mat.pad);
+    pad.position.y = LINK.finger / 2 - 6;
+    pad.castShadow = true;
+    finger.add(pad);
+    return finger;
+  }
+
+  var jawLeft = new THREE.Group();
+  var jawRight = new THREE.Group();
+  jawLeft.add(makeFinger());
+  jawRight.add(makeFinger());
+  gripper.add(jawLeft);
+  gripper.add(jawRight);
+
+  function jawHalfAngle(value) {
+    var t = THREE.MathUtils.clamp((value - 500) / (665 - 500), 0, 1);
+    return THREE.MathUtils.lerp(50, 10, t) * D;
+  }
+
+  function applyState() {
+    // Positive Y rotation is counterclockwise seen from above.
+    baseYaw.rotation.y = (state[6] - 500) * UNIT * D;
+    // Positive Z rotation tilts +Y toward -X, which is inward for this model.
+    shoulder.rotation.z = (500 - state[5]) * UNIT * D;
+    elbow.rotation.z = (state[4] - 500) * UNIT * D;
+    wristPitch.rotation.z = (500 - state[3]) * UNIT * D;
+    // Joint 2 increases counterclockwise per the test, but the viewing
+    // direction was not recorded, so this sign is a model assumption.
+    wristRoll.rotation.y = (state[2] - 500) * UNIT * D;
+    var jaw = jawHalfAngle(state[1]);
+    jawLeft.rotation.z = jaw;
+    jawRight.rotation.z = -jaw;
+  }
+
+  var valueLabels = {};
+  var rangeInputs = {};
+  var controlsEl = document.getElementById("controls");
+
+  JOINTS.forEach(function (joint) {
+    var row = document.createElement("div");
+    row.className = "ctrl";
+    row.title = joint.hint;
+
+    var name = document.createElement("span");
+    name.className = "name";
+    name.textContent = joint.id + " " + joint.name;
+
+    var value = document.createElement("span");
+    value.className = "val";
+    value.textContent = joint.initial;
+
+    var input = document.createElement("input");
+    input.type = "range";
+    input.min = joint.min;
+    input.max = joint.max;
+    input.step = 1;
+    input.value = joint.initial;
+    input.title = joint.hint;
+    input.addEventListener("input", function () {
+      state[joint.id] = Number(input.value);
+      value.textContent = input.value;
+      applyState();
+      markTouched();
+    });
+
+    row.appendChild(name);
+    row.appendChild(value);
+    row.appendChild(input);
+    controlsEl.appendChild(row);
+
+    valueLabels[joint.id] = value;
+    rangeInputs[joint.id] = input;
+  });
+
+  function syncUI() {
+    JOINTS.forEach(function (joint) {
+      rangeInputs[joint.id].value = state[joint.id];
+      valueLabels[joint.id].textContent = state[joint.id];
+    });
+  }
+
+  var API_URL = "./api/pose";
+  var syncEnabled = true;
+  var syncTimer = null;
+  var syncInFlight = false;
+  var syncAgain = false;
+  var userTouched = false;
+
+  function setSyncState(text, mode) {
+    var el = document.getElementById("syncState");
+    el.textContent = text;
+    el.className = "sync" + (mode ? " " + mode : "");
+  }
+
+  function queueSync() {
+    if (!syncEnabled) return;
+    syncAgain = true;
+    if (syncTimer || syncInFlight) return;
+    syncTimer = window.setTimeout(sendPose, 40);
+  }
+
+  function sendPose() {
+    syncTimer = null;
+    if (!syncAgain || syncInFlight) return;
+    syncAgain = false;
+    syncInFlight = true;
+    fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pose: state })
+    })
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function () {
+        setSyncState("已同步", "on");
+      })
+      .catch(function () {
+        syncEnabled = false;
+        setSyncState("同步断开", "err");
+      })
+      .finally(function () {
+        syncInFlight = false;
+        if (syncAgain && syncEnabled) queueSync();
+      });
+  }
+
+  function markTouched() {
+    userTouched = true;
+    queueSync();
+  }
+
+  document.getElementById("reset").addEventListener("click", function () {
+    JOINTS.forEach(function (joint) {
+      state[joint.id] = THREE.MathUtils.clamp(500, joint.min, joint.max);
+    });
+    syncUI();
+    applyState();
+    markTouched();
+  });
+
+  document.getElementById("pose").addEventListener("click", function () {
+    var pose = { 1: 500, 2: 500, 3: 120, 4: 860, 5: 650, 6: 500 };
+    JOINTS.forEach(function (joint) {
+      state[joint.id] = THREE.MathUtils.clamp(pose[joint.id], joint.min, joint.max);
+    });
+    syncUI();
+    applyState();
+    markTouched();
+  });
+
+  document.getElementById("grip").addEventListener("click", function () {
+    state[1] = 640;
+    syncUI();
+    applyState();
+    markTouched();
+  });
+
+  window.addEventListener("resize", function () {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  applyState();
+
+  setSyncState("连接中", "");
+  fetch(API_URL, { cache: "no-store" })
+    .then(function (response) {
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      return response.json();
+    })
+    .then(function (data) {
+      if (!userTouched) {
+        var pose = data && data.pose ? data.pose : data;
+        JOINTS.forEach(function (joint) {
+          if (pose && pose[joint.id] !== undefined) {
+            state[joint.id] = THREE.MathUtils.clamp(
+              Number(pose[joint.id]),
+              joint.min,
+              joint.max
+            );
+          }
+        });
+        syncUI();
+        applyState();
+      }
+      setSyncState("已同步", "on");
+    })
+    .catch(function () {
+      syncEnabled = false;
+      setSyncState("本地模式", "");
+    });
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+})();
+</script>
+</body>
+</html>
