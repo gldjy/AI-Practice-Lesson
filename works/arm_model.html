@@ -174,9 +174,8 @@
   <div class="btns">
     <button id="reset">初始姿态</button>
     <button id="pose">弯曲姿态</button>
-    <button id="grip">夹爪 640</button>
   </div>
-  <p class="hint">拖动夹爪舵机上的青色光环，自动解算 3/4/5/6 号并平滑跟随；松开后同步给 client。</p>
+  <p class="hint">拖动夹爪舵机上的青色光环，自动解算 3/4/5/6 号并平滑跟随，拖动中实时同步给 client。</p>
   <p class="note">
     连杆长度按 ArmParam.md 的旋转中心距离绘制。底座立柱高度和连杆截面是显示估值，舵机体积已简化。模型只做关节限位，不检查箱体或线缆碰撞。初始姿态使用安全 stand（2 号 145，6 号 490）。通过 arm_server.py 打开时，滑杆变化会同步给 arm_client.py。
   </p>
@@ -460,7 +459,6 @@
   var IK_LAST = LINK.wristPitchToRoll + LINK.rollToGripper;
   var MAX_REACH = LINK.upperArm + LINK.forearm + IK_LAST;
   var ikTargetPose = null;
-  var ikSyncPending = false;
 
   function clampValue(value, low, high) {
     return Math.max(low, Math.min(high, value));
@@ -600,12 +598,9 @@
     if (moving) {
       syncUI();
       applyState();
+      markTouched();
     } else {
       ikTargetPose = null;
-      if (ikSyncPending) {
-        ikSyncPending = false;
-        markTouched();
-      }
     }
   }
 
@@ -634,6 +629,7 @@
     input.value = joint.initial;
     input.title = joint.hint;
     input.addEventListener("input", function () {
+      ikTargetPose = null;
       state[joint.id] = Number(input.value);
       value.textContent = input.value;
       applyState();
@@ -672,6 +668,7 @@
   function queueSync() {
     if (!syncEnabled) return;
     syncAgain = true;
+    setSyncState("同步中", "");
     if (syncTimer || syncInFlight) return;
     syncTimer = window.setTimeout(sendPose, 40);
   }
@@ -691,7 +688,7 @@
         return response.json();
       })
       .then(function () {
-        setSyncState("已同步", "on");
+        if (!syncAgain) setSyncState("已同步", "on");
       })
       .catch(function () {
         syncEnabled = false;
@@ -709,6 +706,7 @@
   }
 
   document.getElementById("reset").addEventListener("click", function () {
+    ikTargetPose = null;
     JOINTS.forEach(function (joint) {
       state[joint.id] = THREE.MathUtils.clamp(STAND_POSE[joint.id], joint.min, joint.max);
     });
@@ -718,17 +716,11 @@
   });
 
   document.getElementById("pose").addEventListener("click", function () {
+    ikTargetPose = null;
     var pose = { 1: 500, 2: 145, 3: 120, 4: 860, 5: 650, 6: 500 };
     JOINTS.forEach(function (joint) {
       state[joint.id] = THREE.MathUtils.clamp(pose[joint.id], joint.min, joint.max);
     });
-    syncUI();
-    applyState();
-    markTouched();
-  });
-
-  document.getElementById("grip").addEventListener("click", function () {
-    state[1] = 640;
     syncUI();
     applyState();
     markTouched();
@@ -769,10 +761,11 @@
     if (!hitHandle()) return;
 
     draggingHandle = true;
+    ikTargetPose = null;
+    userTouched = true;
     controls.enabled = false;
     renderer.domElement.style.cursor = "grabbing";
     renderer.domElement.setPointerCapture(event.pointerId);
-    if (syncEnabled) setSyncState("拖动中", "");
 
     var start = handleGroup.getWorldPosition(new THREE.Vector3());
     var normal = camera.getWorldDirection(new THREE.Vector3());
@@ -811,18 +804,9 @@
     controls.enabled = true;
     renderer.domElement.style.cursor = "default";
     targetMarker.visible = false;
-    try {
+    if (renderer.domElement.hasPointerCapture(event.pointerId)) {
       renderer.domElement.releasePointerCapture(event.pointerId);
-    } catch (error) {
-      // The pointer may already be released.
     }
-    if (ikTargetPose) {
-      ikSyncPending = true;
-    } else {
-      markTouched();
-    }
-    if (syncEnabled) setSyncState("同步中", "");
-    else setSyncState("本地模式", "");
 
     event.preventDefault();
     event.stopPropagation();
@@ -861,8 +845,8 @@
         });
         syncUI();
         applyState();
+        setSyncState("已同步", "on");
       }
-      setSyncState("已同步", "on");
     })
     .catch(function () {
       syncEnabled = false;
