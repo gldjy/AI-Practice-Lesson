@@ -94,6 +94,19 @@ def apply_pose_group(uart, pose, wait_ms=1500):
     time.sleep(1.5)
 
 
+def wait_action(uart, timeout=10.0):
+    """Waits until the last action group should have finished."""
+    deadline = time.time() + timeout
+    while uart.getArmActionsBusy() and time.time() < deadline:
+        time.sleep(0.05)
+
+
+def vendor_stand_pose(uart):
+    """Returns the final angles of the vendor stand action group."""
+    frames = [frame for frame in uart.robotArm.actionStand if len(frame) > 6]
+    return {joint: frames[-1][joint - 1] for joint in range(1, 7)}
+
+
 GROUP_DELTA = 100
 
 
@@ -136,7 +149,7 @@ def run_dry(base, rate, last):
         time.sleep(delay)
 
 
-def run_arm(args, base):
+def run_arm(args, base, target_pose):
     """Applies server poses to the arm until interrupted."""
     try:
         from uart import Uart
@@ -157,10 +170,17 @@ def run_arm(args, base):
         uart.setEnable(True)
         time.sleep(0.5)
 
-        pose = fetch_pose(base)
-        print(f"[Info] 应用初始姿态(动作组): {format_pose(pose)}")
-        apply_pose_group(uart, pose)
-        last = pose
+        print("[Info] 执行厂家 stand 初始化...")
+        uart.robotArmMoveit(uart.robotArm.Movement.stand)
+        wait_action(uart)
+        time.sleep(3.0)  # Same settle time as arm_test.py.
+        stand_pose = vendor_stand_pose(uart)
+        print(f"[Info] 厂家 stand: {format_pose(stand_pose)}")
+        last = stand_pose
+
+        print(f"[Info] 调整到 server 姿态: {format_pose(target_pose)}")
+        apply_pose(uart, target_pose, stand_pose)
+        last = target_pose
         lost = False
         delay = 1.0 / args.rate
 
@@ -205,6 +225,7 @@ def main():
     parser.add_argument("--rate", type=float, default=20.0, help="轮询频率 Hz")
     parser.add_argument("--dry-run", action="store_true", help="不打开串口，只打印姿态")
     parser.add_argument("--yes", action="store_true", help="跳过启动确认")
+    parser.add_argument("--force-start", action="store_true", help="允许从远离安全 stand 的姿态启动（危险）")
     args = parser.parse_args()
 
     if args.rate <= 0:
@@ -240,6 +261,11 @@ def main():
             print("\n[Info] 已停止")
         return 0
 
+    if deltas and args.yes and not args.force_start:
+        print("[Error] --yes 不会跳过远姿态保护。")
+        print("[Error] 请先在网页点“初始姿态”或重启 server；确需强制启动时加 --force-start。")
+        return 1
+
     if not args.yes:
         if deltas:
             try:
@@ -260,7 +286,7 @@ def main():
                 return 0
 
     try:
-        return run_arm(args, base)
+        return run_arm(args, base, pose)
     except KeyboardInterrupt:
         print("\n[Info] 已停止")
         return 0
